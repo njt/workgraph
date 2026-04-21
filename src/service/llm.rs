@@ -120,11 +120,15 @@ fn call_claude_cli(model: &str, prompt: &str, timeout_secs: u64) -> Result<LlmCa
                 .arg("--output-format")
                 .arg("json")
                 .arg("--dangerously-skip-permissions")
-                // Strip CLAUDECODE env var so the CLI doesn't refuse to run
-                // when invoked from within a Claude Code session (e.g. daemon
-                // spawned by a coordinator agent). This is a headless --print
-                // call, not an interactive nested session.
+                // Strip Claude-Code-specific env vars that leak through
+                // when the daemon was launched from inside a Claude Code
+                // session. MANAGED_BY_HOST in particular makes the CLI
+                // prefer an inaccessible host bridge over the configured
+                // OAuth token.
                 .env_remove("CLAUDECODE")
+                .env_remove("CLAUDE_CODE_ENTRYPOINT")
+                .env_remove("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST")
+                .env_remove("CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH")
                 .stdin(process::Stdio::piped())
                 .stdout(process::Stdio::piped())
                 .stderr(process::Stdio::piped())
