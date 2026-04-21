@@ -611,6 +611,21 @@ pub(crate) fn spawn_agent_inner(
             });
         }
     }
+    // On Windows, the direct equivalent is `CREATE_NEW_PROCESS_GROUP`: it
+    // puts the child at the root of its own process group so console
+    // control events (Ctrl+Break, Ctrl+C, window-close) sent to — or
+    // cascading through — the daemon's group don't also terminate the
+    // agent. Without this, task agents spawned on Windows die roughly at
+    // each 60s tick because a stray console event in the daemon's group
+    // takes them with it; with the flag set they run cleanly to
+    // completion. The coordinator claude process already uses the same
+    // flag in `coordinator_agent::spawn_claude_process` for this reason.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NEW_PROCESS_GROUP = 0x00000200
+        cmd.creation_flags(0x0000_0200);
+    }
 
     // Claim the task BEFORE spawning the process to prevent race conditions
     // where two concurrent spawns both pass the status check.
