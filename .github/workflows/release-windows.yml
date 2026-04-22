@@ -3,7 +3,14 @@
 #
 # Produces:
 #   wg-<version>-x86_64-pc-windows-msvc.zip  (GitHub-hosted windows-latest)
-#   wg-<version>-aarch64-pc-windows-msvc.zip (GitHub-hosted windows-11-arm)
+#
+# Native ARM64 (aarch64-pc-windows-msvc) is **deferred**: boring-sys2's
+# CMake config calls `enable_language(ASM_NASM)` before `OPENSSL_NO_ASM`
+# has any effect, and NASM isn't on the windows-11-arm runner. Locally
+# we bypass this with a vendored patch in the boring-sys2 crate source;
+# CI doesn't have that. ARM64 users can run the x86_64 binary under
+# Windows' x64 emulation in the meantime (handoff section 3.9). Re-
+# enable once boring-sys2 upstream gates the NASM probe on `NO_ASM`.
 #
 # Each zip contains `wg.exe`, `README-windows.md`, `install.ps1`, and
 # `SHA256SUMS` for verification. The release page hosts the zips plus a
@@ -40,8 +47,8 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
-          - target: aarch64-pc-windows-msvc
-            runner: windows-11-arm
+          # aarch64-pc-windows-msvc is deferred pending a CI-friendly
+          # boring-sys2 build — see the comment at the top of this file.
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -102,11 +109,18 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/wg.exe" "$staging/"
           Copy-Item "docs/README-windows.md" "$staging/" -ErrorAction SilentlyContinue
           Copy-Item "scripts/install.ps1" "$staging/" -ErrorAction SilentlyContinue
-          # Generate SHA256SUMS over archive contents
-          Get-ChildItem -File $staging | ForEach-Object {
-            $h = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower()
-            "$h  $($_.Name)"
-          } | Out-File -Encoding ascii "$staging/SHA256SUMS"
+          # Generate SHA256SUMS over archive contents. Materialize the
+          # file list and hash lines fully *before* touching SHA256SUMS
+          # — piping Get-ChildItem straight into Out-File racy on Windows:
+          # Out-File opens SHA256SUMS inside $staging while the pipeline
+          # is still enumerating, and the next Get-FileHash trips on the
+          # locked in-progress SHA256SUMS.
+          $files = Get-ChildItem -File $staging
+          $lines = foreach ($f in $files) {
+            $h = (Get-FileHash -Algorithm SHA256 $f.FullName).Hash.ToLower()
+            "$h  $($f.Name)"
+          }
+          $lines | Out-File -Encoding ascii "$staging/SHA256SUMS"
           Compress-Archive -Path $staging -DestinationPath "$staging.zip" -Force
 
       - name: Upload archive
