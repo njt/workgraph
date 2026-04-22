@@ -1,0 +1,143 @@
+# Build and publish Windows binaries when a tag of the shape
+# `v<MAJOR>.<MINOR>.<PATCH>(-<pre>)?(+win.<N>)?` is pushed.
+#
+# Produces:
+#   wg-<version>-x86_64-pc-windows-msvc.zip  (GitHub-hosted windows-latest)
+#   wg-<version>-aarch64-pc-windows-msvc.zip (GitHub-hosted windows-11-arm)
+#
+# Each zip contains `wg.exe`, `README-windows.md`, `install.ps1`, and
+# `SHA256SUMS` for verification. The release page hosts the zips plus a
+# copy of `install.ps1` alongside so users can one-line-install:
+#
+#     irm https://github.com/<owner>/workgraph/releases/latest/download/install.ps1 | iex
+#
+# Tag format deliberately narrow: `v<semver>+win.<n>` lets us cut Windows-
+# specific release tags (e.g. `v0.1.0+win.1`) without confusing any future
+# upstream release scheme.
+
+name: release-windows
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "tag name (for manual-dispatch builds)"
+        required: true
+        default: "v0.0.0-dev"
+
+permissions:
+  contents: write  # needed to create the Release
+
+jobs:
+  build:
+    name: build-${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install LLVM (for cc / BoringSSL native build)
+        run: choco install -y llvm
+        shell: pwsh
+
+      - name: Install CMake (for BoringSSL)
+        run: choco install -y cmake --installargs '"ADD_CMAKE_TO_PATH=System"'
+        shell: pwsh
+
+      # BoringSSL (via `boring-sys2`) requires `OPENSSL_NO_ASM=YES` on native
+      # ARM64 until upstream 0x676e67/btls#151 lands. Setting it for all
+      # Windows targets is harmless on x64 (just slightly slower crypto).
+      - name: Configure build env
+        shell: pwsh
+        run: |
+          echo "OPENSSL_NO_ASM=YES" >> $env:GITHUB_ENV
+          echo "CARGO_PROFILE_RELEASE_STRIP=symbols" >> $env:GITHUB_ENV
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: cargo build --release --locked
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble release archive
+        shell: pwsh
+        run: |
+          $staging = "wg-${{ steps.version.outputs.version }}-${{ matrix.target }}"
+          New-Item -Type Directory -Path $staging -Force | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/wg.exe" "$staging/"
+          Copy-Item "docs/README-windows.md" "$staging/" -ErrorAction SilentlyContinue
+          Copy-Item "scripts/install.ps1" "$staging/" -ErrorAction SilentlyContinue
+          # Generate SHA256SUMS over archive contents
+          Get-ChildItem -File $staging | ForEach-Object {
+            $h = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower()
+            "$h  $($_.Name)"
+          } | Out-File -Encoding ascii "$staging/SHA256SUMS"
+          Compress-Archive -Path $staging -DestinationPath "$staging.zip" -Force
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: wg-${{ matrix.target }}
+          path: wg-${{ steps.version.outputs.version }}-${{ matrix.target }}.zip
+
+  release:
+    name: publish-release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Create / update GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            scripts/install.ps1
+          draft: false
+          prerelease: ${{ contains(github.ref, '-') }}
+          generate_release_notes: true
