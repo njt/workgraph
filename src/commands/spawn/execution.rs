@@ -556,14 +556,17 @@ pub(crate) fn spawn_agent_inner(
         &settings.executor_type,
     )?;
 
-    // Run the wrapper script. On Windows, `wrapper_path` often comes back
-    // from PathBuf::canonicalize with the `\\?\` extended-length prefix
-    // (e.g. `\\?\C:\src\ontempo\.workgraph\agents\agent-710\run.sh`). Most
-    // Windows APIs accept that form, but Git-for-Windows' bash.exe does
-    // not — it reports "No such file or directory" before the script can
-    // run, and the agent dies instantly with no output.log. Strip the
-    // prefix so bash sees a plain `C:\...` path, which it handles fine.
-    let mut cmd = Command::new("bash");
+    // Run the wrapper script. Two Windows-specific concerns combined:
+    //   1. Resolve bash via platform_bash so we don't end up calling
+    //      `C:\Windows\System32\bash.exe` (WSL shim) instead of Git for
+    //      Windows' bash — WSL can't see Windows paths the same way.
+    //   2. Strip the `\\?\` extended-length prefix from `wrapper_path`
+    //      before handing it to bash as an argument — PathBuf::canonicalize
+    //      returns that form on Windows and Git bash reports "No such file
+    //      or directory" when it sees it.
+    let bash_path = workgraph::platform_bash::bash_exe_path(config.bash.path.as_deref())
+        .context("Failed to resolve bash executable for spawn wrapper")?;
+    let mut cmd = Command::new(&bash_path);
     cmd.arg(strip_verbatim_prefix(&wrapper_path));
 
     // Set environment variables from executor config

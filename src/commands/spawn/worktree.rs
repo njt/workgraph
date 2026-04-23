@@ -115,12 +115,19 @@ pub fn create_worktree(
     // path as an argument.
     let setup_script = workgraph_dir.join("worktree-setup.sh");
     if setup_script.exists() {
-        let _ = Command::new("bash")
-            .arg(strip_verbatim_prefix(&setup_script))
-            .arg(strip_verbatim_prefix(&worktree_dir))
-            .arg(strip_verbatim_prefix(project_root))
-            .current_dir(strip_verbatim_prefix(&worktree_dir))
-            .output(); // Best-effort; don't fail spawn if setup hook fails
+        // No Config in scope here — bash_exe_path falls through to env +
+        // well-known Windows paths + filtered PATH scan, which is what we
+        // want for a hook script. Plus strip the `\\?\` verbatim prefix
+        // from every path we hand to bash, since canonicalize() returns
+        // that form on Windows and Git bash can't parse it as an argument.
+        if let Ok(bash_path) = workgraph::platform_bash::bash_exe_path(None) {
+            let _ = Command::new(&bash_path)
+                .arg(strip_verbatim_prefix(&setup_script))
+                .arg(strip_verbatim_prefix(&worktree_dir))
+                .arg(strip_verbatim_prefix(project_root))
+                .current_dir(strip_verbatim_prefix(&worktree_dir))
+                .output(); // Best-effort; don't fail spawn if setup hook fails
+        }
     }
 
     Ok(WorktreeInfo {
