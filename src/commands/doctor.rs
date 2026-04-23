@@ -171,30 +171,58 @@ fn check_host_tools() -> Vec<Check> {
         }
     }
 
-    // bash
-    match run_capture("bash", &["--version"]) {
-        Some((true, stdout, _)) => {
-            let first = stdout.lines().next().unwrap_or("").trim().to_string();
-            // Git-for-Windows bash identifies as msys or mingw.
-            #[cfg(windows)]
-            if first.contains("msys") || first.contains("mingw") {
-                out.push(Check::ok("bash", format!("found (Git for Windows): {}", first)));
-            } else {
-                out.push(Check::warn(
-                    "bash",
-                    format!("found but not Git-for-Windows: {}", first),
-                    "Install Git for Windows — workgraph spawns wrapper scripts via its bash. \
-                     WSL's bash can't see Windows paths the same way.",
-                ));
+    // bash — use the same resolver the runtime uses, so doctor reflects
+    // the bash wg will actually spawn (not whatever `bash` is first on
+    // PATH, which on Windows is often the WSL shim).
+    match workgraph::platform_bash::resolve_bash(None) {
+        Ok(resolution) => {
+            let bash_path_str = resolution.path.to_string_lossy().to_string();
+            let source_tag = match resolution.source {
+                workgraph::platform_bash::BashSource::Config => "config",
+                workgraph::platform_bash::BashSource::Env => "env",
+                workgraph::platform_bash::BashSource::KnownLocation => "well-known",
+                workgraph::platform_bash::BashSource::Path => "PATH",
+                workgraph::platform_bash::BashSource::Fallback => "fallback",
+            };
+            match run_capture_path(&resolution.path, &["--version"]) {
+                Some((true, stdout, _)) => {
+                    let first = stdout.lines().next().unwrap_or("").trim().to_string();
+                    let detail = format!("[{}] {} — {}", source_tag, bash_path_str, first);
+                    #[cfg(windows)]
+                    {
+                        if first.contains("msys") || first.contains("mingw") {
+                            out.push(Check::ok("bash", format!("Git for Windows — {}", detail)));
+                        } else {
+                            out.push(Check::warn(
+                                "bash",
+                                format!("resolved to non-Git-for-Windows bash — {}", detail),
+                                "Install Git for Windows. If you have it but wg picked the \
+                                 wrong bash, set `[bash] path = \"C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe\"` \
+                                 in `.workgraph/config.toml` or `WG_BASH_PATH` in your env.",
+                            ));
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    out.push(Check::ok("bash", detail));
+                }
+                _ => {
+                    out.push(Check::err(
+                        "bash",
+                        format!(
+                            "resolved to {} [{}] but it wouldn't run",
+                            bash_path_str, source_tag
+                        ),
+                        "Check the file exists and is executable.",
+                    ));
+                }
             }
-            #[cfg(not(windows))]
-            out.push(Check::ok("bash", format!("found: {}", first)));
         }
-        _ => {
+        Err(e) => {
             out.push(Check::err(
                 "bash",
-                "not found on PATH",
-                "Install Git for Windows (on Windows) — workgraph wrappers require bash.",
+                format!("could not resolve a usable bash: {}", e),
+                "Install Git for Windows (on Windows) — workgraph wrappers require bash. \
+                 You can also set `WG_BASH_PATH` or `[bash] path` in `.workgraph/config.toml`.",
             ));
         }
     }
@@ -473,11 +501,14 @@ fn check_windows_specific() -> Vec<Check> {
         }
     }
 
-    // Which `bash` did `where` return first?
+    // For comparison: what `where bash` sees on PATH (raw), alongside the
+    // resolved path above. Useful when someone's asking "but why is wg
+    // picking that bash when my PATH says something else" — this shows
+    // both sides.
     if let Some((true, stdout, _)) = run_capture("where", &["bash"]) {
         let first = stdout.lines().next().unwrap_or("").trim().to_string();
         if !first.is_empty() {
-            out.push(Check::info("bash.exe path", first));
+            out.push(Check::info("PATH first bash", first));
         }
     }
 
@@ -485,6 +516,18 @@ fn check_windows_specific() -> Vec<Check> {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────
+
+/// Same as `run_capture` but takes a concrete path — used when we've
+/// already resolved the binary (e.g. via `platform_bash::resolve_bash`)
+/// and want to invoke exactly that one rather than whatever PATH yields.
+fn run_capture_path(program: &Path, args: &[&str]) -> Option<(bool, String, String)> {
+    let output = Command::new(program).args(args).output().ok()?;
+    Some((
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    ))
+}
 
 /// Run a command; return `(success, stdout, stderr)` or `None` if the
 /// binary wasn't found on PATH.
