@@ -119,10 +119,12 @@ Write-Ok "Installed: $dest"
 # --- 5. PATH handling --------------------------------------------------
 
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+$script:PathWasUpdated = $false
 if ($userPath -notmatch [Regex]::Escape($installDir)) {
     $newPath = if ($userPath) { "$userPath;$installDir" } else { $installDir }
     [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
     Write-Ok "Added $installDir to user PATH (open a new terminal to pick it up)"
+    $script:PathWasUpdated = $true
 } else {
     Write-Info "$installDir already on user PATH"
 }
@@ -144,4 +146,8 @@ try {
 }
 
 Write-Host ""
-Write-Ok "Done. Restart your terminal so the updated PATH takes effect, then try: wg --help"
+if ($script:PathWasUpdated) {
+    Write-Ok "Done. Restart your terminal so the updated PATH takes effect, then try: wg --help"
+} else {
+    Write-Ok "Done. Try: wg --help"
+}

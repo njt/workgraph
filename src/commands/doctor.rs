@@ -260,9 +260,10 @@ fn check_host_tools() -> Vec<Check> {
             Some(_) => {
                 out.push(Check::info(
                     "timeout(1)",
-                    "Windows TIMEOUT.EXE is first on PATH. Not a problem for \
-                     modern wg (uses its own cross-platform timeout helper), \
-                     only matters if you shell out to `timeout` yourself.",
+                    "Windows timeout is first in PATH, which won't behave like \
+                     Unix timeout if your workflow scripts call timeout. You'll \
+                     need to change your PATH or hard-code the path to the \
+                     correct timeout.",
                 ));
             }
             None => {
