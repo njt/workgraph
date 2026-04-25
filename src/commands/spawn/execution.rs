@@ -1360,28 +1360,78 @@ if [ -n "$WG_WORKTREE_PATH" ] && [ -n "$WG_BRANCH" ] && [ -n "$WG_PROJECT_ROOT" 
         if [ "$COMMITS" -gt 0 ]; then
             cd "$WG_PROJECT_ROOT"
 
-            # Acquire merge lock (serialize concurrent merges)
-            MERGE_LOCK="$WG_PROJECT_ROOT/.wg-worktrees/.merge-lock"
-            mkdir -p "$(dirname "$MERGE_LOCK")"
-            exec 9>"$MERGE_LOCK"
-            flock 9
+            # Portable merge lock using mkdir (atomic on all platforms including Windows/NTFS).
+            MERGE_LOCK_DIR="$WG_PROJECT_ROOT/.wg-worktrees/.merge-lock.d"
+            mkdir -p "$WG_PROJECT_ROOT/.wg-worktrees"
 
-            git merge --squash "$WG_BRANCH" 2>> "$OUTPUT_FILE"
-            MERGE_EXIT=$?
+            MERGE_ATTEMPTS=0
+            MAX_MERGE_ATTEMPTS=5
+            MERGE_SUCCESS=0
 
-            if [ $MERGE_EXIT -ne 0 ]; then
-                git merge --abort 2>/dev/null
-                echo "[wrapper] Merge conflict on $WG_BRANCH — marking task failed for retry" >> "$OUTPUT_FILE"
-                wg fail "$TASK_ID" --reason "Merge conflict integrating worktree branch $WG_BRANCH" 2>> "$OUTPUT_FILE"
-            else
-                git commit -m "feat: $TASK_ID ($WG_AGENT_ID)
+            while [ $MERGE_ATTEMPTS -lt $MAX_MERGE_ATTEMPTS ]; do
+                MERGE_ATTEMPTS=$((MERGE_ATTEMPTS + 1))
+
+                # Acquire lock via mkdir (atomic creation = lock acquired)
+                if mkdir "$MERGE_LOCK_DIR" 2>/dev/null; then
+                    # Stale lock guard: write our PID so others can detect dead holders
+                    echo "$$" > "$MERGE_LOCK_DIR/pid"
+
+                    git merge --squash "$WG_BRANCH" 2>> "$OUTPUT_FILE"
+                    MERGE_EXIT=$?
+
+                    if [ $MERGE_EXIT -ne 0 ]; then
+                        git merge --abort 2>/dev/null
+                        # Release lock before retry/fail
+                        rm -rf "$MERGE_LOCK_DIR"
+                        # Check if this is a real conflict vs dirty working tree from a concurrent merge
+                        if [ $MERGE_ATTEMPTS -lt $MAX_MERGE_ATTEMPTS ]; then
+                            BACKOFF=$((MERGE_ATTEMPTS * 2))
+                            echo "[wrapper] Merge attempt $MERGE_ATTEMPTS failed (exit $MERGE_EXIT), retrying in ${{BACKOFF}}s..." >> "$OUTPUT_FILE"
+                            sleep $BACKOFF
+                            continue
+                        else
+                            echo "[wrapper] Merge conflict on $WG_BRANCH after $MAX_MERGE_ATTEMPTS attempts — marking task failed for retry" >> "$OUTPUT_FILE"
+                            wg fail "$TASK_ID" --reason "Merge conflict integrating worktree branch $WG_BRANCH" 2>> "$OUTPUT_FILE"
+                            break
+                        fi
+                    fi
+
+                    git commit --no-gpg-sign -m "feat: $TASK_ID ($WG_AGENT_ID)
 
 Squash-merged from worktree branch $WG_BRANCH" 2>> "$OUTPUT_FILE"
-                echo "[wrapper] Merged $WG_BRANCH to $(git rev-parse --abbrev-ref HEAD)" >> "$OUTPUT_FILE"
-            fi
+                    COMMIT_EXIT=$?
 
-            # Release merge lock
-            flock -u 9
+                    # Release lock
+                    rm -rf "$MERGE_LOCK_DIR"
+
+                    if [ $COMMIT_EXIT -eq 0 ]; then
+                        echo "[wrapper] Merged $WG_BRANCH to $(git rev-parse --abbrev-ref HEAD)" >> "$OUTPUT_FILE"
+                        MERGE_SUCCESS=1
+                    else
+                        echo "[wrapper] WARNING: git commit failed (exit $COMMIT_EXIT) after squash merge" >> "$OUTPUT_FILE"
+                    fi
+                    break
+                else
+                    # Lock held by another agent — check for stale lock
+                    if [ -f "$MERGE_LOCK_DIR/pid" ]; then
+                        LOCK_PID=$(cat "$MERGE_LOCK_DIR/pid" 2>/dev/null)
+                        if [ -n "$LOCK_PID" ] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
+                            echo "[wrapper] Removing stale merge lock (PID $LOCK_PID is dead)" >> "$OUTPUT_FILE"
+                            rm -rf "$MERGE_LOCK_DIR"
+                            continue
+                        fi
+                    fi
+                    BACKOFF=$((MERGE_ATTEMPTS * 2))
+                    echo "[wrapper] Merge lock held by another agent, waiting ${{BACKOFF}}s (attempt $MERGE_ATTEMPTS/$MAX_MERGE_ATTEMPTS)..." >> "$OUTPUT_FILE"
+                    sleep $BACKOFF
+                fi
+            done
+
+            if [ $MERGE_SUCCESS -eq 0 ] && [ $MERGE_ATTEMPTS -ge $MAX_MERGE_ATTEMPTS ]; then
+                echo "[wrapper] Failed to acquire merge lock after $MAX_MERGE_ATTEMPTS attempts" >> "$OUTPUT_FILE"
+                # Clean up any partial state
+                rm -rf "$MERGE_LOCK_DIR" 2>/dev/null
+            fi
         else
             echo "[wrapper] No commits on $WG_BRANCH, nothing to merge" >> "$OUTPUT_FILE"
         fi

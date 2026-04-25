@@ -861,7 +861,7 @@ mod tests {
     }
 
     #[test]
-    fn test_wrapper_merge_back_uses_flock() {
+    fn test_wrapper_merge_back_uses_mkdir_lock() {
         let temp_dir = TempDir::new().unwrap();
         let mut task = make_task("t1", "Test Task");
         task.exec = Some("echo hello".to_string());
@@ -874,9 +874,22 @@ mod tests {
         let wrapper_path = agent_output_dir(&workgraph_dir, "agent-1").join("run.sh");
         let script = fs::read_to_string(&wrapper_path).unwrap();
 
-        assert!(script.contains(".merge-lock"), "Should use merge lock file");
-        assert!(script.contains("flock 9"), "Should acquire flock");
-        assert!(script.contains("flock -u 9"), "Should release flock");
+        assert!(
+            script.contains(".merge-lock.d"),
+            "Should use mkdir-based lock directory"
+        );
+        assert!(
+            script.contains("mkdir \"$MERGE_LOCK_DIR\""),
+            "Should acquire lock via mkdir"
+        );
+        assert!(
+            script.contains("rm -rf \"$MERGE_LOCK_DIR\""),
+            "Should release lock by removing directory"
+        );
+        assert!(
+            !script.contains("flock"),
+            "Should NOT use flock (not portable to Windows)"
+        );
     }
 
     #[test]
@@ -959,6 +972,121 @@ mod tests {
         assert!(
             script.contains("Squash-merged from worktree branch"),
             "Commit message should mention squash merge origin"
+        );
+    }
+
+    #[test]
+    fn test_wrapper_merge_back_retries_on_failure() {
+        let temp_dir = TempDir::new().unwrap();
+        let unique_id = get_unique_id();
+        let task_id = format!("t{}", unique_id);
+        let mut task = make_task(&task_id, "Test Task");
+        task.exec = Some("echo hello".to_string());
+        setup_graph(temp_dir.path(), vec![task]);
+
+        let workgraph_dir = temp_dir.path().join(".workgraph");
+        run(&workgraph_dir, &task_id, "shell", None, None, false).unwrap();
+
+        let wrapper_path = agent_output_dir(&workgraph_dir, "agent-1").join("run.sh");
+        let script = fs::read_to_string(&wrapper_path).unwrap();
+
+        assert!(
+            script.contains("MAX_MERGE_ATTEMPTS=5"),
+            "Should have configurable max attempts"
+        );
+        assert!(
+            script.contains("retrying in"),
+            "Should log retry with backoff"
+        );
+        assert!(
+            script.contains("MERGE_ATTEMPTS=$((MERGE_ATTEMPTS + 1))"),
+            "Should increment attempt counter"
+        );
+    }
+
+    #[test]
+    fn test_wrapper_merge_back_detects_stale_locks() {
+        let temp_dir = TempDir::new().unwrap();
+        let unique_id = get_unique_id();
+        let task_id = format!("t{}", unique_id);
+        let mut task = make_task(&task_id, "Test Task");
+        task.exec = Some("echo hello".to_string());
+        setup_graph(temp_dir.path(), vec![task]);
+
+        let workgraph_dir = temp_dir.path().join(".workgraph");
+        run(&workgraph_dir, &task_id, "shell", None, None, false).unwrap();
+
+        let wrapper_path = agent_output_dir(&workgraph_dir, "agent-1").join("run.sh");
+        let script = fs::read_to_string(&wrapper_path).unwrap();
+
+        assert!(
+            script.contains("stale merge lock"),
+            "Should detect and remove stale locks from dead processes"
+        );
+        assert!(
+            script.contains("kill -0 \"$LOCK_PID\""),
+            "Should check if lock-holding PID is alive"
+        );
+    }
+
+    #[test]
+    fn test_wrapper_merge_back_succeeds_on_clean_verify() {
+        let temp_dir = TempDir::new().unwrap();
+        let unique_id = get_unique_id();
+        let task_id = format!("t{}", unique_id);
+        let mut task = make_task(&task_id, "Test Task");
+        task.exec = Some("echo hello".to_string());
+        setup_graph(temp_dir.path(), vec![task]);
+
+        let workgraph_dir = temp_dir.path().join(".workgraph");
+        run(&workgraph_dir, &task_id, "shell", None, None, false).unwrap();
+
+        let wrapper_path = agent_output_dir(&workgraph_dir, "agent-1").join("run.sh");
+        let script = fs::read_to_string(&wrapper_path).unwrap();
+
+        // The merge-back section must:
+        // 1. Use portable locking (mkdir, not flock)
+        assert!(
+            !script.contains("flock"),
+            "Must not use flock (unavailable on Windows Git Bash)"
+        );
+        assert!(
+            script.contains("mkdir \"$MERGE_LOCK_DIR\""),
+            "Must use mkdir for atomic lock acquisition"
+        );
+
+        // 2. Retry on merge failure with backoff
+        assert!(
+            script.contains("MAX_MERGE_ATTEMPTS"),
+            "Must have retry logic for merge failures"
+        );
+        assert!(
+            script.contains("sleep $BACKOFF"),
+            "Must back off between retries"
+        );
+
+        // 3. Clean up lock on all exit paths
+        assert!(
+            script.contains("rm -rf \"$MERGE_LOCK_DIR\""),
+            "Must clean up lock directory"
+        );
+
+        // 4. Handle stale locks from dead processes
+        assert!(
+            script.contains("stale merge lock"),
+            "Must detect stale locks"
+        );
+
+        // 5. Report success
+        assert!(
+            script.contains("Merged $WG_BRANCH to"),
+            "Must report successful merge"
+        );
+
+        // 6. Use --no-gpg-sign (agents shouldn't need GPG keys)
+        assert!(
+            script.contains("--no-gpg-sign"),
+            "Must use --no-gpg-sign for agent commits"
         );
     }
 }
