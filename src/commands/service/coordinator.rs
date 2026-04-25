@@ -2707,7 +2707,10 @@ fn spawn_eval_inline(
     let script = if let Some(ref sa_id) = special_agent_verified {
         let escaped_sa_id = sa_id.replace('\'', "'\\''");
         format!(
-            r#"unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
+            r#"unset CLAUDECODE
+unset CLAUDE_CODE_ENTRYPOINT
+unset CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST
+unset CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH
 _WG_STDERR=$(mktemp)
 {eval_cmd} >> '{escaped_output}' 2>"$_WG_STDERR"
 EXIT_CODE=$?
@@ -2729,7 +2732,10 @@ exit $EXIT_CODE"#,
         )
     } else {
         format!(
-            r#"unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
+            r#"unset CLAUDECODE
+unset CLAUDE_CODE_ENTRYPOINT
+unset CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST
+unset CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH
 _WG_STDERR=$(mktemp)
 {eval_cmd} >> '{escaped_output}' 2>"$_WG_STDERR"
 EXIT_CODE=$?
@@ -2754,11 +2760,14 @@ exit $EXIT_CODE"#,
     fs::write(&wrapper_path, &script)
         .with_context(|| format!("Failed to write eval wrapper script: {:?}", wrapper_path))?;
 
-    // Fork the process
+    // Fork the process — run from the wrapper file (not bash -c) so the
+    // script is read from disk, matching the regular agent spawn path.
+    // bash -c with complex multi-line scripts can fail on Windows/MSYS2
+    // due to command-line argument parsing differences.
     let bash_path = workgraph::platform_bash::bash_exe_path(config.bash.path.as_deref())
         .context("Failed to resolve bash executable for inline eval")?;
     let mut cmd = Command::new(&bash_path);
-    cmd.arg("-c").arg(&script);
+    cmd.arg(spawn::sanitize_bash_path(&wrapper_path.to_string_lossy()));
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
@@ -2774,14 +2783,6 @@ exit $EXIT_CODE"#,
             });
         }
     }
-    // On Windows, the direct equivalent is `CREATE_NEW_PROCESS_GROUP`: it
-    // puts the child at the root of its own process group so console
-    // control events (Ctrl+Break, Ctrl+C, window-close) sent to — or
-    // cascading through — the daemon's group don't also terminate it.
-    // Without this, inline-spawn bash children die at roughly each 60s
-    // tick because a stray console event in the daemon's group takes them
-    // with it. The regular task-agent spawn path in `spawn/execution`
-    // already uses the same flag for this reason.
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -2932,7 +2933,10 @@ fn spawn_assign_inline(dir: &Path, assign_task_id: &str) -> Result<(String, u32)
 
     // Build the script: run assign, then mark done/failed
     let script = format!(
-        r#"unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
+        r#"unset CLAUDECODE
+unset CLAUDE_CODE_ENTRYPOINT
+unset CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST
+unset CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH
 _WG_STDERR=$(mktemp)
 {assign_cmd} >> '{escaped_output}' 2>"$_WG_STDERR"
 EXIT_CODE=$?
@@ -2956,13 +2960,14 @@ exit $EXIT_CODE"#,
     fs::write(&wrapper_path, &script)
         .with_context(|| format!("Failed to write assign wrapper script: {:?}", wrapper_path))?;
 
-    // Fork the process
+    // Fork the process — run from the wrapper file (not bash -c) so the
+    // script is read from disk, matching the regular agent spawn path.
     let assign_config = Config::load_or_default(dir);
     let bash_path =
         workgraph::platform_bash::bash_exe_path(assign_config.bash.path.as_deref())
             .context("Failed to resolve bash executable for inline assign")?;
     let mut cmd = Command::new(&bash_path);
-    cmd.arg("-c").arg(&script);
+    cmd.arg(spawn::sanitize_bash_path(&wrapper_path.to_string_lossy()));
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
@@ -2978,14 +2983,6 @@ exit $EXIT_CODE"#,
             });
         }
     }
-    // On Windows, the direct equivalent is `CREATE_NEW_PROCESS_GROUP`: it
-    // puts the child at the root of its own process group so console
-    // control events (Ctrl+Break, Ctrl+C, window-close) sent to — or
-    // cascading through — the daemon's group don't also terminate it.
-    // Without this, inline-spawn bash children die at roughly each 60s
-    // tick because a stray console event in the daemon's group takes them
-    // with it. The regular task-agent spawn path in `spawn/execution`
-    // already uses the same flag for this reason.
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -6291,6 +6288,84 @@ mod tests {
         assert_eq!(meta_content["agent_id"], agent_id);
         assert_eq!(meta_content["task_id"], ".evaluate-test-task");
         assert_eq!(meta_content["executor"], "eval");
+    }
+
+    #[test]
+    fn test_eval_inline_agent_writes_output_log() {
+        let dir = tempdir().unwrap();
+        let wg_dir = dir.path();
+
+        // Create graph with an Open eval task.
+        // Use a trivial exec command that writes to stdout so we can
+        // verify the bash wrapper script actually executes and captures
+        // output.  The command starts with "wg evaluate" so the spawn
+        // code uses it verbatim (no fallback construction).
+        let graph_path = wg_dir.join("graph.jsonl");
+        let mut graph = WorkGraph::new();
+        let mut eval_task = Task::default();
+        eval_task.id = ".evaluate-test-task".to_string();
+        eval_task.title = "Evaluate test-task".to_string();
+        eval_task.status = Status::Open;
+        eval_task.tags = vec!["evaluation".to_string()];
+        // "wg evaluate" prefix causes spawn_eval_inline to use this
+        // literally. The actual command just echoes a sentinel.
+        eval_task.exec = Some(
+            "echo __EVAL_INLINE_SMOKE_TEST__".to_string(),
+        );
+        graph.add_node(Node::Task(eval_task));
+        save_graph(&graph, &graph_path).unwrap();
+
+        // Create agents dir and registry
+        let agents_dir = wg_dir.join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        let registry = AgentRegistry::load_locked(wg_dir).unwrap();
+        registry.save().unwrap();
+
+        // Spawn eval inline
+        let result = spawn_eval_inline(wg_dir, ".evaluate-test-task", None);
+        assert!(
+            result.is_ok(),
+            "spawn_eval_inline failed: {:?}",
+            result.err()
+        );
+
+        let (agent_id, pid) = result.unwrap();
+        let agent_dir = agents_dir.join(&agent_id);
+        let output_log = agent_dir.join("output.log");
+
+        // Wait for the spawned process to finish and write output.
+        // The script is trivial (echo) so it should complete in <5s.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            // Check if process has exited
+            if !workgraph::service::is_process_alive(pid) {
+                // Give filesystem a moment to flush
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!(
+                    "eval-inline agent {} (PID {}) did not exit within 30s",
+                    agent_id, pid
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+
+        // Core assertion: output.log must be non-empty.
+        // If it's empty, the bash wrapper script never executed (the bug).
+        assert!(
+            output_log.exists(),
+            "output.log should exist at {}",
+            output_log.display()
+        );
+        let content = fs::read_to_string(&output_log).unwrap_or_default();
+        assert!(
+            !content.is_empty(),
+            "output.log should be non-empty — the eval-inline bash wrapper \
+             must execute and produce output. Agent dir: {}",
+            agent_dir.display()
+        );
     }
 
     #[test]
