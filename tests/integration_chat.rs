@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
+#[cfg(unix)]
 extern crate libc;
 
 // ---------------------------------------------------------------------------
@@ -123,12 +124,17 @@ impl Drop for DaemonGuard<'_> {
 
         // Belt-and-suspenders: read PID from state.json and kill directly
         // in case `wg service stop` itself fails or the daemon is unresponsive.
-        let state_path = self.wg_dir.join("service").join("state.json");
-        if let Ok(content) = std::fs::read_to_string(&state_path) {
-            if let Ok(state) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(pid) = state["pid"].as_u64() {
-                    unsafe {
-                        libc::kill(pid as i32, libc::SIGKILL);
+        // Unix-only: depends on libc::kill / SIGKILL. On Windows we rely on
+        // `wg service stop` plus the test process tearing down its children.
+        #[cfg(unix)]
+        {
+            let state_path = self.wg_dir.join("service").join("state.json");
+            if let Ok(content) = std::fs::read_to_string(&state_path) {
+                if let Ok(state) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(pid) = state["pid"].as_u64() {
+                        unsafe {
+                            libc::kill(pid as i32, libc::SIGKILL);
+                        }
                     }
                 }
             }
