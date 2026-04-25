@@ -537,17 +537,17 @@ pub fn find_branch_for_worktree(project_root: &Path, worktree_path: &Path) -> Op
         .ok()?;
 
     let text = String::from_utf8_lossy(&output.stdout);
-    let worktree_str = worktree_path.to_string_lossy();
+    let worktree_str = worktree_path.to_string_lossy().replace('\\', "/");
 
     // Porcelain output is blocks separated by blank lines.
     // Each block has: worktree <path>\nHEAD <sha>\nbranch refs/heads/<name>\n
-    let mut current_path: Option<&str> = None;
+    let mut current_path: Option<String> = None;
     for line in text.lines() {
         if let Some(path) = line.strip_prefix("worktree ") {
-            current_path = Some(path);
+            current_path = Some(path.replace('\\', "/"));
         } else if let Some(branch_ref) = line.strip_prefix("branch ") {
-            if let Some(cp) = current_path
-                && cp == worktree_str.as_ref()
+            if let Some(ref cp) = current_path
+                && *cp == worktree_str
             {
                 // Convert refs/heads/wg/agent-X/task-Y to wg/agent-X/task-Y
                 return Some(
@@ -1351,9 +1351,16 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn isolated_git(args: &[&str]) -> Command {
+        let mut cmd = Command::new("git");
+        cmd.args(args);
+        cmd.env("GIT_CONFIG_GLOBAL", "");
+        cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+        cmd
+    }
+
     fn init_git_repo(path: &Path) {
-        Command::new("git")
-            .args(["init"])
+        isolated_git(&["init"])
             .arg(path)
             .env("GIT_AUTHOR_NAME", "Test")
             .env("GIT_AUTHOR_EMAIL", "test@test.com")
@@ -1362,13 +1369,11 @@ mod tests {
             .output()
             .unwrap();
         fs::write(path.join("file.txt"), "hello").unwrap();
-        Command::new("git")
-            .args(["add", "."])
+        isolated_git(&["add", "."])
             .current_dir(path)
             .output()
             .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "init"])
+        isolated_git(&["commit", "-m", "init"])
             .current_dir(path)
             .env("GIT_AUTHOR_NAME", "Test")
             .env("GIT_AUTHOR_EMAIL", "test@test.com")
@@ -1387,8 +1392,7 @@ mod tests {
         let wt_dir = project.join(WORKTREES_DIR).join(agent_id);
         fs::create_dir_all(project.join(WORKTREES_DIR)).unwrap();
 
-        Command::new("git")
-            .args(["worktree", "add"])
+        isolated_git(&["worktree", "add"])
             .arg(&wt_dir)
             .args(["-b", &branch, "HEAD"])
             .current_dir(project)
@@ -1412,8 +1416,7 @@ mod tests {
         assert!(!wt_path.exists());
 
         // Branch should be deleted
-        let output = Command::new("git")
-            .args(["branch", "--list", &branch])
+        let output = isolated_git(&["branch", "--list", &branch])
             .current_dir(&project)
             .output()
             .unwrap();
@@ -1443,13 +1446,11 @@ mod tests {
 
         // Make a commit in the worktree
         fs::write(wt_path.join("new_file.txt"), "agent work").unwrap();
-        Command::new("git")
-            .args(["add", "."])
+        isolated_git(&["add", "."])
             .current_dir(&wt_path)
             .output()
             .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "agent work"])
+        isolated_git(&["commit", "-m", "agent work"])
             .current_dir(&wt_path)
             .env("GIT_AUTHOR_NAME", "Test")
             .env("GIT_AUTHOR_EMAIL", "test@test.com")
@@ -1463,8 +1464,7 @@ mod tests {
 
         // Recovery branch should exist
         let recovery_branch = format!("recover/agent-3/task-baz");
-        let output = Command::new("git")
-            .args(["branch", "--list", &recovery_branch])
+        let output = isolated_git(&["branch", "--list", &recovery_branch])
             .current_dir(&project)
             .output()
             .unwrap();

@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use workgraph::chat::{self, Attachment};
@@ -16,18 +17,15 @@ const MAX_MESSAGE_SIZE: usize = 100 * 1024;
 /// Default timeout waiting for coordinator response.
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
-/// Generate a unique request ID for correlating requests with responses.
-///
-/// Format: `chat-{unix_millis}-{pid}{nanos_suffix}`
-/// The timestamp prefix makes IDs naturally sortable and debuggable.
 fn generate_request_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     let millis = now.as_millis();
-    let nanos_suffix = now.subsec_nanos() % 100_000;
     let pid = std::process::id();
-    format!("chat-{}-{}{:05}", millis, pid, nanos_suffix)
+    format!("chat-{}-{}-{}", millis, pid, seq)
 }
 
 /// Process --attachment flags: validate each file, copy to .workgraph/attachments/,

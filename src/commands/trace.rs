@@ -1583,7 +1583,7 @@ mod tests {
             .join("log")
             .join("agents")
             .join("t1")
-            .join("2026-02-18T20:00:00Z");
+            .join("2026-02-18T20-00-00Z");
         fs::create_dir_all(&archive_dir).unwrap();
         fs::write(archive_dir.join("prompt.txt"), "Test prompt").unwrap();
         fs::write(archive_dir.join("output.txt"), "Test output").unwrap();
@@ -1609,7 +1609,7 @@ mod tests {
             .join("log")
             .join("agents")
             .join("t1")
-            .join("2026-02-18T20:00:00Z");
+            .join("2026-02-18T20-00-00Z");
         fs::create_dir_all(&archive_dir).unwrap();
         fs::write(archive_dir.join("prompt.txt"), "Test prompt").unwrap();
         fs::write(archive_dir.join("output.txt"), "Test output data here").unwrap();

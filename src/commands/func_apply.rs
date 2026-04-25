@@ -21,17 +21,17 @@ fn resolve_function_source(
     function_id: &str,
     workgraph_dir: &Path,
 ) -> Result<TraceFunction> {
-    if let Some((peer_name, remote_func_id)) = source.split_once(':') {
+    if source.ends_with(".yaml") || source.ends_with(".yml") {
+        // Direct file path (check before ':' split to avoid matching Windows drive letters)
+        let path = resolve_file_path(source)?;
+        function::load_function(&path)
+            .map_err(|e| anyhow::anyhow!("Failed to load function from '{}': {}", source, e))
+    } else if let Some((peer_name, remote_func_id)) = source.split_once(':') {
         // peer:function-id syntax
         let resolved = workgraph::federation::resolve_peer(peer_name, workgraph_dir)?;
         let peer_func_dir = function::functions_dir(&resolved.workgraph_dir);
         function::find_function_by_prefix(&peer_func_dir, remote_func_id)
             .map_err(|e| anyhow::anyhow!("From peer '{}': {}", peer_name, e))
-    } else if source.ends_with(".yaml") || source.ends_with(".yml") {
-        // Direct file path
-        let path = resolve_file_path(source)?;
-        function::load_function(&path)
-            .map_err(|e| anyhow::anyhow!("Failed to load function from '{}': {}", source, e))
     } else {
         // Treat as a peer name, with function_id as the function to look up
         let resolved = workgraph::federation::resolve_peer(source, workgraph_dir)?;

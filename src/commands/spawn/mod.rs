@@ -203,25 +203,30 @@ mod tests {
             .to_string()
     }
 
+    fn isolated_git(args: &[&str]) -> std::process::Command {
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(args);
+        cmd.env("GIT_CONFIG_GLOBAL", "");
+        cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+        cmd
+    }
+
     fn init_git_repo(path: &Path) -> std::process::Output {
-        std::process::Command::new("git")
-            .args(["init"])
+        isolated_git(&["init"])
             .arg(path)
             .output()
             .unwrap()
     }
 
     fn git_config(path: &Path, key: &str, value: &str) -> std::process::Output {
-        std::process::Command::new("git")
-            .args(["config", key, value])
+        isolated_git(&["config", key, value])
             .current_dir(path)
             .output()
             .unwrap()
     }
 
     fn git_add_and_commit(path: &Path, filename: &str, message: &str) -> Result<(), String> {
-        let add_output = std::process::Command::new("git")
-            .args(["add", filename])
+        let add_output = isolated_git(&["add", filename])
             .current_dir(path)
             .output()
             .unwrap();
@@ -232,8 +237,7 @@ mod tests {
             ));
         }
 
-        let commit_output = std::process::Command::new("git")
-            .args(["commit", "-m", message])
+        let commit_output = isolated_git(&["commit", "-m", message])
             .current_dir(path)
             .output()
             .unwrap();
@@ -269,33 +273,9 @@ mod tests {
         git_config(&project_root, "user.name", "Test");
 
         // Clean up any leftover worktrees from previous test runs
-        let _ = std::process::Command::new("git")
-            .args(["worktree", "prune"])
+        let _ = isolated_git(&["worktree", "prune"])
             .current_dir(&project_root)
             .output();
-
-        // Set safe directory for this specific project directory only
-        let _safe_dir_output = std::process::Command::new("git")
-            .args([
-                "config",
-                "--global",
-                "--add",
-                "safe.directory",
-                &project_root.to_string_lossy(),
-            ])
-            .output()
-            .unwrap();
-        // Also add the final location where the test will run
-        let _safe_dir_output2 = std::process::Command::new("git")
-            .args([
-                "config",
-                "--global",
-                "--add",
-                "safe.directory",
-                &dir.to_string_lossy(),
-            ])
-            .output()
-            .unwrap();
 
         // Create a simple file and commit it
         let file_path = project_root.join("file.txt");

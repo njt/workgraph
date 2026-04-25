@@ -386,10 +386,11 @@ mod tests {
         let agency_dir = wg_dir.join("agency");
         workgraph::agency::init(&agency_dir).unwrap();
 
-        // Write federation.yaml with a named remote
+        // Write federation.yaml with a named remote (use forward slashes for YAML compatibility)
+        let store_path_str = source.store_path().display().to_string().replace('\\', "/");
         let federation_yaml = format!(
             "remotes:\n  upstream:\n    path: \"{}\"\n    description: \"test remote\"\n",
-            source.store_path().display()
+            store_path_str
         );
         std::fs::write(wg_dir.join("federation.yaml"), federation_yaml).unwrap();
 

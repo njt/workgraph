@@ -211,30 +211,33 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn isolated_git(args: &[&str]) -> Command {
+        let mut cmd = Command::new("git");
+        cmd.args(args);
+        cmd.env("GIT_CONFIG_GLOBAL", "");
+        cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+        cmd
+    }
+
     fn init_git_repo(path: &Path) {
-        Command::new("git")
-            .args(["init"])
+        isolated_git(&["init"])
             .arg(path)
             .output()
             .unwrap();
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
+        isolated_git(&["config", "user.email", "test@test.com"])
             .current_dir(path)
             .output()
             .unwrap();
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
+        isolated_git(&["config", "user.name", "Test"])
             .current_dir(path)
             .output()
             .unwrap();
         std::fs::write(path.join("file.txt"), "hello").unwrap();
-        Command::new("git")
-            .args(["add", "."])
+        isolated_git(&["add", "."])
             .current_dir(path)
             .output()
             .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "init"])
+        isolated_git(&["commit", "-m", "init"])
             .current_dir(path)
             .output()
             .unwrap();
