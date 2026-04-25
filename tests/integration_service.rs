@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Integration tests for the service daemon end-to-end flow.
 //!
 //! Tests:

@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Integration tests for multi-coordinator support.
 //!
 //! Verifies that:

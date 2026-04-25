@@ -58,6 +58,7 @@ fn test_load_missing_graph_file_error_message_is_useful() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn test_save_to_readonly_directory_returns_error() {
     // save_graph uses atomic write (temp file + rename), so the directory

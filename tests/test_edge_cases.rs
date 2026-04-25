@@ -9,7 +9,6 @@
 //! - Target directory cleanup edge cases
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
@@ -360,8 +359,11 @@ fn test_partially_missing_worktree_structure() {
 
 // ── Permission Denied Tests ──────────────────────────────────────────────────
 
+#[cfg(unix)]
 #[test]
 fn test_edge_cases_permission_denied() {
+    use std::os::unix::fs::PermissionsExt;
+
     // Test cleanup behavior with permission-related issues
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("project");
@@ -399,8 +401,11 @@ fn test_edge_cases_permission_denied() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn test_permission_denied_metadata_access() {
+    use std::os::unix::fs::PermissionsExt;
+
     // Test behavior when metadata.json can't be read due to permissions
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("project");
@@ -620,8 +625,11 @@ fn test_recursive_symlink_handling() {
 
 // ── Target Directory Cleanup Tests ──────────────────────────────────────────
 
+#[cfg(unix)]
 #[test]
 fn test_target_directory_cleanup_edge_cases() {
+    use std::os::unix::fs::PermissionsExt;
+
     // Test cleanup of cargo target directories in various scenarios
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("project");
@@ -728,8 +736,11 @@ fn test_target_directory_with_active_processes() {
 
 // ── Integration Tests ────────────────────────────────────────────────────────
 
+#[cfg(unix)]
 #[test]
 fn test_comprehensive_edge_case_integration() {
+    use std::os::unix::fs::PermissionsExt;
+
     // Integration test combining multiple edge cases
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("project");

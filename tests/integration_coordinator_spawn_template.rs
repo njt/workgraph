@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Integration tests verifying that the coordinator agent correctly resolves
 //! `command_template` (executor config) and `provider` when spawning agents.
 //!

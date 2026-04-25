@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Crash scenario tests for agent termination scenarios
 //!
 //! Tests crash scenarios identified in the agent exit worktree cleanup audit:

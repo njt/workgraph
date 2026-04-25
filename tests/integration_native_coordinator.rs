@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
+#[cfg(unix)]
 extern crate libc;
 
 // ---------------------------------------------------------------------------
@@ -171,12 +172,14 @@ fn wait_for_socket(wg_dir: &Path) {
     }
 }
 
+#[cfg(unix)]
 /// Guard that stops the daemon and kills by PID on drop.
 struct DaemonGuard<'a> {
     wg_dir: &'a Path,
     env_vars: Vec<(String, String)>,
 }
 
+#[cfg(unix)]
 impl<'a> DaemonGuard<'a> {
     fn new(wg_dir: &'a Path) -> Self {
         DaemonGuard {
@@ -203,6 +206,7 @@ impl<'a> DaemonGuard<'a> {
     }
 }
 
+#[cfg(unix)]
 impl Drop for DaemonGuard<'_> {
     fn drop(&mut self) {
         stop_daemon_env(self.wg_dir, &self.env_refs());
@@ -679,6 +683,7 @@ async fn native_coordinator_journal_with_openrouter_model() {
 /// Service startup with executor = "native" succeeds even without an API key.
 /// The daemon starts, but the coordinator agent logs a provider creation error.
 /// Chat falls back to stub responses.
+#[cfg(unix)]
 #[test]
 fn native_coordinator_service_startup_no_api_key() {
     let tmp = TempDir::new().unwrap();
@@ -728,6 +733,7 @@ fn native_coordinator_service_startup_no_api_key() {
 
 /// Service startup with executor = "native" and a fake API key.
 /// The daemon starts and the native coordinator initializes (provider creation succeeds).
+#[cfg(unix)]
 #[test]
 fn native_coordinator_service_startup_with_api_key() {
     let tmp = TempDir::new().unwrap();
@@ -780,6 +786,7 @@ fn native_coordinator_service_startup_with_api_key() {
 }
 
 /// Backwards compatibility: executor = "claude" still starts the Claude CLI path.
+#[cfg(unix)]
 #[test]
 fn native_coordinator_backwards_compat_claude_executor() {
     let tmp = TempDir::new().unwrap();
@@ -848,6 +855,7 @@ done
 /// to the native coordinator loop and writes responses to the outbox.
 /// This test requires a fake API key and checks that the coordinator
 /// processes the message (even though the API call will fail with a fake key).
+#[cfg(unix)]
 #[test]
 fn native_coordinator_chat_routing() {
     let tmp = TempDir::new().unwrap();
@@ -921,6 +929,7 @@ fn native_coordinator_chat_routing() {
 /// from the coordinator's own executor. Verify that when the coordinator
 /// executor is "native", task agents still get dispatched via the configured
 /// task executor.
+#[cfg(unix)]
 #[test]
 fn native_coordinator_task_dispatch_with_shell_executor() {
     let tmp = TempDir::new().unwrap();
@@ -1088,6 +1097,7 @@ PATH = "{}"
 ///
 /// Requires OPENROUTER_API_KEY to be set.
 /// Run with: cargo test --test integration_native_coordinator -- --ignored --nocapture
+#[cfg(unix)]
 #[test]
 #[ignore]
 fn native_coordinator_real_e2e_chat() {
@@ -1152,6 +1162,7 @@ fn native_coordinator_real_e2e_chat() {
 /// coordinator handles API errors gracefully and continues processing.
 ///
 /// Requires OPENROUTER_API_KEY to be set.
+#[cfg(unix)]
 #[test]
 #[ignore]
 fn native_coordinator_real_e2e_error_recovery() {

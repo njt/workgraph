@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Integration tests for the Phase 2 coordinator agent.
 //!
 //! Tests the persistent LLM-backed coordinator agent that replaces the Phase 1
