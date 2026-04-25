@@ -1650,10 +1650,37 @@ fn cleanup_legacy_daemon_tasks(dir: &Path, logger: &DaemonLogger) {
     }
 }
 
-/// Run per-coordinator chat compaction when the message threshold is exceeded.
+/// Reset accumulated_tokens to 0 for a specific coordinator after successful compaction.
+fn reset_accumulated_tokens_for(dir: &Path, coordinator_id: u32) {
+    let mut state = CoordinatorState::load_or_default_for(dir, coordinator_id);
+    state.accumulated_tokens = 0;
+    state.save_for(dir, coordinator_id);
+}
+
+/// Check whether compaction should run for a coordinator, considering both
+/// message count threshold (from chat_compactor::should_compact) and token
+/// accumulation threshold (from CoordinatorState).
+fn should_compact_for_coordinator(dir: &Path, coordinator_id: u32, token_threshold: u64) -> bool {
+    if workgraph::service::chat_compactor::should_compact(dir, coordinator_id) {
+        return true;
+    }
+    if token_threshold > 0 {
+        let cs = CoordinatorState::load_or_default_for(dir, coordinator_id);
+        if cs.accumulated_tokens >= token_threshold {
+            return true;
+        }
+    }
+    false
+}
+
+/// Run per-coordinator chat compaction when the message threshold or token
+/// accumulation threshold is exceeded. Resets accumulated_tokens on success.
 fn run_pending_chat_compactions(dir: &Path, logger: &DaemonLogger) {
+    let config = workgraph::config::Config::load_or_default(dir);
+    let token_threshold = config.effective_compaction_threshold();
+
     for coordinator_id in workgraph::chat::list_coordinator_ids(dir) {
-        if !workgraph::service::chat_compactor::should_compact(dir, coordinator_id) {
+        if !should_compact_for_coordinator(dir, coordinator_id, token_threshold) {
             continue;
         }
 
@@ -1661,9 +1688,13 @@ fn run_pending_chat_compactions(dir: &Path, logger: &DaemonLogger) {
         let state_before =
             workgraph::service::chat_compactor::ChatCompactorState::load(dir, coordinator_id);
         let msgs_before = state_before.last_message_count;
+        let tokens_before = CoordinatorState::load_or_default_for(dir, coordinator_id).accumulated_tokens;
 
         match workgraph::service::chat_compactor::run_chat_compaction(dir, coordinator_id) {
             Ok(path) => {
+                // Reset accumulated_tokens after successful compaction
+                reset_accumulated_tokens_for(dir, coordinator_id);
+
                 // Record compaction event to operations.jsonl so the TUI can show it
                 let state_after = workgraph::service::chat_compactor::ChatCompactorState::load(
                     dir,
@@ -1676,6 +1707,8 @@ fn run_pending_chat_compactions(dir: &Path, logger: &DaemonLogger) {
                     "messages_after": state_after.last_message_count,
                     "compaction_count_before": state_before.compaction_count,
                     "compaction_count_after": state_after.compaction_count,
+                    "tokens_before": tokens_before,
+                    "tokens_after": 0,
                 });
                 let _ = workgraph::provenance::record(
                     dir,
@@ -1687,9 +1720,10 @@ fn run_pending_chat_compactions(dir: &Path, logger: &DaemonLogger) {
                 );
 
                 logger.info(&format!(
-                    "Chat compaction complete for coordinator {} → {}",
+                    "Chat compaction complete for coordinator {} → {} (tokens: {} → 0)",
                     coordinator_id,
-                    path.display()
+                    path.display(),
+                    tokens_before
                 ));
             }
             Err(e) => {
@@ -2864,6 +2898,24 @@ pub fn run_status(dir: &Path, json: bool) -> Result<()> {
     let config = workgraph::config::Config::load_or_default(dir);
     let compaction_threshold = config.effective_compaction_threshold();
     let compactor_state = workgraph::service::compactor::CompactorState::load(dir);
+    // Use chat compactor state for "last compaction" when graph compactor has never run
+    let chat_compactor_last = {
+        let ids = workgraph::chat::list_coordinator_ids(dir);
+        let mut latest: Option<String> = None;
+        for cid in ids {
+            let cs = workgraph::service::chat_compactor::ChatCompactorState::load(dir, cid);
+            if let Some(ref ts) = cs.last_compaction {
+                if latest.as_ref().is_none_or(|l| ts > l) {
+                    latest = Some(ts.clone());
+                }
+            }
+        }
+        latest
+    };
+    let effective_last_compaction = compactor_state
+        .last_compaction
+        .clone()
+        .or(chat_compactor_last);
 
     // Log file info
     let log_path = log_file_path(dir);
@@ -2903,7 +2955,7 @@ pub fn run_status(dir: &Path, json: bool) -> Result<()> {
             "compaction": {
                 "accumulated_tokens": coord.accumulated_tokens,
                 "threshold": compaction_threshold,
-                "last_compaction": compactor_state.last_compaction,
+                "last_compaction": effective_last_compaction,
                 "compaction_count": compactor_state.compaction_count,
             },
             "log": {
@@ -2989,7 +3041,7 @@ pub fn run_status(dir: &Path, json: bool) -> Result<()> {
             } else {
                 0
             };
-            let last_str = match compactor_state.last_compaction {
+            let last_str = match effective_last_compaction {
                 Some(ref ts) => {
                     if let Ok(parsed) = ts.parse::<chrono::DateTime<chrono::Utc>>() {
                         let ago = chrono::Utc::now()
@@ -4477,6 +4529,89 @@ mod tests {
         assert_eq!(c1.max_agents, 8);
         assert_eq!(c1.ticks, 99);
         assert_eq!(c1.accumulated_tokens, 990);
+    }
+
+    #[test]
+    fn test_coordinator_compactor_reduces_accumulated_tokens() {
+        use workgraph::service::chat_compactor::ChatCompactorState;
+
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path();
+        fs::create_dir_all(dir.join("service")).unwrap();
+
+        // Set up coordinator 0 with high accumulated tokens (simulating many LLM turns)
+        let state = CoordinatorState {
+            enabled: true,
+            accumulated_tokens: 500_000,
+            ticks: 100,
+            max_agents: 4,
+            ..Default::default()
+        };
+        state.save_for(dir, 0);
+
+        // Verify the high token state before compaction
+        assert_eq!(
+            CoordinatorState::load_or_default_for(dir, 0).accumulated_tokens,
+            500_000
+        );
+
+        // Simulate a successful chat compaction by writing a ChatCompactorState
+        // that indicates compaction happened (as run_chat_compaction would).
+        let chat_state = ChatCompactorState {
+            last_compaction: Some("2026-04-26T10:00:00Z".to_string()),
+            last_message_count: 60,
+            compaction_count: 1,
+            last_inbox_id: 30,
+            last_outbox_id: 30,
+        };
+        chat_state.save(dir, 0).unwrap();
+
+        // Call the post-compaction token reset
+        reset_accumulated_tokens_for(dir, 0);
+
+        // Verify accumulated_tokens is now 0
+        let after = CoordinatorState::load_or_default_for(dir, 0);
+        assert_eq!(
+            after.accumulated_tokens, 0,
+            "accumulated_tokens should be 0 after compaction"
+        );
+        // Other state should be preserved
+        assert_eq!(after.ticks, 100, "ticks should be preserved");
+        assert_eq!(after.max_agents, 4, "max_agents should be preserved");
+    }
+
+    #[test]
+    fn test_compaction_token_trigger_without_message_threshold() {
+        use workgraph::chat;
+
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path();
+        fs::create_dir_all(dir.join("service")).unwrap();
+        // Create chat dir so list_coordinator_ids finds it
+        fs::create_dir_all(dir.join("chat").join("0")).unwrap();
+
+        // Set up coordinator with high accumulated tokens but few chat messages
+        let state = CoordinatorState {
+            enabled: true,
+            accumulated_tokens: 200_000,
+            ..Default::default()
+        };
+        state.save_for(dir, 0);
+
+        // Add only a few messages (below the 50 message threshold)
+        for i in 0..5 {
+            chat::append_inbox_for(dir, 0, &format!("msg {}", i), &format!("req-{}", i)).unwrap();
+        }
+
+        // should_compact_for_coordinator should return true because tokens exceed threshold
+        let config = workgraph::config::Config::load_or_default(dir);
+        let threshold = config.effective_compaction_threshold();
+        assert!(
+            should_compact_for_coordinator(dir, 0, threshold),
+            "should trigger compaction when accumulated_tokens ({}) >= threshold ({})",
+            200_000,
+            threshold
+        );
     }
 
     #[test]
