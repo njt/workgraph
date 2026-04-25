@@ -104,6 +104,17 @@ fn estimate_cost(entry: &ModelRegistryEntry, usage: &TokenUsage) -> f64 {
     input_cost + output_cost + cache_read_cost + cache_write_cost
 }
 
+fn format_prompt_diagnostic(prompt: &str) -> String {
+    let len = prompt.len();
+    let head: String = prompt.chars().take(500).collect();
+    if len > 1000 {
+        let tail: String = prompt.chars().rev().take(500).collect::<Vec<_>>().into_iter().rev().collect();
+        format!("prompt_len={len} prompt_head=\"{head}\" prompt_tail=\"{tail}\"")
+    } else {
+        format!("prompt_len={len} prompt_head=\"{head}\"")
+    }
+}
+
 fn call_claude_cli(model: &str, prompt: &str, timeout_secs: u64) -> Result<LlmCallResult> {
     use std::io::Write as _;
 
@@ -151,11 +162,20 @@ fn call_claude_cli(model: &str, prompt: &str, timeout_secs: u64) -> Result<LlmCa
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        anyhow::bail!(
-            "Claude CLI call failed (exit {:?}): stderr={:?} stdout={:?}",
+        let prompt_diag = format_prompt_diagnostic(prompt);
+        log::warn!(
+            "Claude CLI call failed (exit {:?}): stderr={:?} stdout={:?} {}",
             output.status.code(),
             stderr.chars().take(500).collect::<String>(),
-            stdout.chars().take(500).collect::<String>()
+            stdout.chars().take(500).collect::<String>(),
+            prompt_diag
+        );
+        anyhow::bail!(
+            "Claude CLI call failed (exit {:?}): stderr={:?} stdout={:?} {}",
+            output.status.code(),
+            stderr.chars().take(500).collect::<String>(),
+            stdout.chars().take(500).collect::<String>(),
+            prompt_diag
         );
     }
 
@@ -171,7 +191,9 @@ fn call_claude_cli(model: &str, prompt: &str, timeout_secs: u64) -> Result<LlmCa
     let token_usage = extract_json_usage(&val);
 
     if text.is_empty() {
-        anyhow::bail!("Empty response from claude CLI");
+        let prompt_diag = format_prompt_diagnostic(prompt);
+        log::warn!("Empty response from claude CLI: {}", prompt_diag);
+        anyhow::bail!("Empty response from claude CLI: {}", prompt_diag);
     }
     Ok(LlmCallResult { text, token_usage })
 }
@@ -660,6 +682,65 @@ mod tests {
         let usage = token_usage.expect("should have token usage with defaults");
         assert_eq!(usage.input_tokens, 0);
         assert_eq!(usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn test_call_claude_cli_logs_prompt_diagnostic_on_failure() {
+        // Short prompt: only head shown (no tail)
+        let short = "Hello world";
+        let diag = format_prompt_diagnostic(short);
+        assert!(
+            diag.contains("prompt_len=11"),
+            "should contain prompt length: {diag}"
+        );
+        assert!(
+            diag.contains("prompt_head=\"Hello world\""),
+            "short prompt head should be full text: {diag}"
+        );
+        assert!(
+            !diag.contains("prompt_tail="),
+            "short prompt should NOT have a tail field: {diag}"
+        );
+
+        // Medium prompt (501–1000 chars): head only, truncated at 500
+        let medium = "x".repeat(800);
+        let diag = format_prompt_diagnostic(&medium);
+        assert!(
+            diag.contains("prompt_len=800"),
+            "should contain prompt length: {diag}"
+        );
+        let expected_head: String = "x".repeat(500);
+        assert!(
+            diag.contains(&format!("prompt_head=\"{expected_head}\"")),
+            "medium prompt head should be first 500 chars: {diag}"
+        );
+        assert!(
+            !diag.contains("prompt_tail="),
+            "medium prompt (<= 1000 chars) should NOT have a tail field: {diag}"
+        );
+
+        // Long prompt (>1000 chars): head + tail
+        let long_prompt = format!("START{}END{}", "a".repeat(996), "b".repeat(497));
+        assert!(long_prompt.len() > 1000);
+        let diag = format_prompt_diagnostic(&long_prompt);
+        assert!(
+            diag.contains(&format!("prompt_len={}", long_prompt.len())),
+            "should contain prompt length: {diag}"
+        );
+        assert!(
+            diag.contains("prompt_head=\"START"),
+            "long prompt head should start with beginning of prompt: {diag}"
+        );
+        assert!(
+            diag.contains("prompt_tail="),
+            "long prompt should have a tail field: {diag}"
+        );
+        // Tail should be last 500 chars
+        let tail: String = long_prompt.chars().rev().take(500).collect::<Vec<_>>().into_iter().rev().collect();
+        assert!(
+            diag.contains(&format!("prompt_tail=\"{tail}\"")),
+            "tail should be last 500 chars: {diag}"
+        );
     }
 
     #[test]
