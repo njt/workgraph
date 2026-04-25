@@ -60,6 +60,17 @@ fn extract_session_id(agent: &AgentEntry) -> Option<String> {
     None
 }
 
+/// Check if an agent's output contains "No conversation found", indicating a
+/// `--resume` with a vanished session ID. Returns true when the next dispatch
+/// should start fresh (drop the stale session_id).
+fn detect_session_lost(output_file: &str) -> bool {
+    if let Ok(content) = std::fs::read_to_string(output_file) {
+        content.contains("No conversation found")
+    } else {
+        false
+    }
+}
+
 /// Extract token usage from an agent's stream.jsonl file.
 ///
 /// Used as a fallback when output.log doesn't contain parseable token data
@@ -362,14 +373,38 @@ pub(crate) fn cleanup_dead_agents(dir: &Path, graph_path: &Path) -> Result<Vec<S
 
     // Extract token usage and session_id from dead agents' stream files
     for (agent_id, task_id, _pid, output_file, _reason) in &dead {
-        // Extract session_id from stream events
-        if let Some(agent) = locked_registry.get_agent(agent_id)
-            && let Some(sid) = extract_session_id(agent)
-            && let Some(task) = graph.get_task_mut(task_id)
-            && task.session_id.is_none()
-        {
-            task.session_id = Some(sid);
-            tasks_modified = true;
+        // If the agent died because --resume hit a vanished session,
+        // clear the stale session_id so the next dispatch starts fresh.
+        if detect_session_lost(output_file) {
+            if let Some(task) = graph.get_task_mut(task_id)
+                && task.session_id.is_some()
+            {
+                eprintln!(
+                    "[triage] Agent {} (task {}): session vanished — clearing stale session_id for fresh dispatch",
+                    agent_id, task_id
+                );
+                task.session_id = None;
+                task.log.push(LogEntry {
+                    timestamp: Utc::now().to_rfc3339(),
+                    actor: Some("triage".to_string()),
+                    user: None,
+                    message: format!(
+                        "Cleared stale session_id: --resume failed with vanished session (agent {})",
+                        agent_id
+                    ),
+                });
+                tasks_modified = true;
+            }
+        } else {
+            // Extract session_id from stream events (normal path)
+            if let Some(agent) = locked_registry.get_agent(agent_id)
+                && let Some(sid) = extract_session_id(agent)
+                && let Some(task) = graph.get_task_mut(task_id)
+                && task.session_id.is_none()
+            {
+                task.session_id = Some(sid);
+                tasks_modified = true;
+            }
         }
 
         // Extract token usage from output.log or stream.jsonl
@@ -1949,5 +1984,80 @@ mod tests {
 
         let result = validate_and_parse_agent_metadata(&metadata_path, "agent-123").unwrap();
         assert!(result.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Session-lost detection: clear stale session_id on resume failure
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_daemon_falls_back_to_fresh_after_session_lost() {
+        // When an agent dies with "No conversation found" (stale --resume),
+        // triage should clear the task's session_id so the next dispatch
+        // starts fresh instead of looping on the same dead session.
+        let temp_dir = TempDir::new().unwrap();
+        let wg_dir = temp_dir.path();
+        let gpath = wg_dir.join("graph.jsonl");
+
+        // Immediate reaping (grace = 0)
+        fs::create_dir_all(wg_dir).ok();
+        fs::write(
+            wg_dir.join("config.toml"),
+            "[agent]\nreaper_grace_seconds = 0\n",
+        )
+        .unwrap();
+
+        // Task already has a session_id from a previous agent run
+        let mut graph = workgraph::graph::WorkGraph::new();
+        let task = Task {
+            id: "task-1".to_string(),
+            title: "Test Task".to_string(),
+            status: Status::InProgress,
+            assigned: Some("agent-1".to_string()),
+            session_id: Some("94015ab6-3d5a-47f9-bfd7-d4a295d1bef9".to_string()),
+            ..Default::default()
+        };
+        graph.add_node(workgraph::graph::Node::Task(task));
+        workgraph::parser::save_graph(&graph, &gpath).unwrap();
+
+        // Create the agent output directory with an output.log containing the
+        // "No conversation found" error that Claude CLI emits.
+        let agent_dir = wg_dir.join("agents").join("agent-1");
+        fs::create_dir_all(&agent_dir).unwrap();
+        let output_log = agent_dir.join("output.log");
+        fs::write(
+            &output_log,
+            r#"error: "No conversation found with session ID: 94015ab6-3d5a-47f9-bfd7-d4a295d1bef9"
+"#,
+        )
+        .unwrap();
+
+        // Register a dead agent (PID that doesn't exist)
+        let mut registry = AgentRegistry::new();
+        let agent_id =
+            registry.register_agent(999999999, "task-1", "test", output_log.to_str().unwrap());
+        registry.save(wg_dir).unwrap();
+
+        // Run the reaper
+        let cleaned = cleanup_dead_agents(wg_dir, &gpath).unwrap();
+        assert_eq!(cleaned.len(), 1, "Should detect one dead agent");
+        assert_eq!(cleaned[0], agent_id);
+
+        // The key assertion: session_id must be cleared
+        let graph = workgraph::parser::load_graph(&gpath).unwrap();
+        let task = graph.get_task("task-1").unwrap();
+        assert_eq!(
+            task.session_id, None,
+            "session_id should be cleared after 'No conversation found' error"
+        );
+        assert_eq!(task.status, Status::Open, "Task should be reset to Open");
+
+        // Verify there's a log entry explaining the session was cleared
+        assert!(
+            task.log.iter().any(|l| l.message.contains("session")
+                && (l.message.contains("vanished") || l.message.contains("cleared") || l.message.contains("stale"))),
+            "Task should have a log entry about the cleared session: {:?}",
+            task.log
+        );
     }
 }
