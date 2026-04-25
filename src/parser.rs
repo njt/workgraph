@@ -751,6 +751,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_save_to_readonly_path() {
         use std::os::unix::fs::PermissionsExt;
 

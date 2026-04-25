@@ -2749,6 +2749,11 @@ exit $EXIT_CODE"#,
         )
     };
 
+    // Persist the wrapper script so the agent dir is never empty.
+    let wrapper_path = output_dir.join("run.sh");
+    fs::write(&wrapper_path, &script)
+        .with_context(|| format!("Failed to write eval wrapper script: {:?}", wrapper_path))?;
+
     // Fork the process
     let bash_path = workgraph::platform_bash::bash_exe_path(config.bash.path.as_deref())
         .context("Failed to resolve bash executable for inline eval")?;
@@ -2811,6 +2816,19 @@ exit $EXIT_CODE"#,
     };
 
     let pid = child.id();
+
+    // Write metadata (after spawn so we have the PID).
+    let metadata = serde_json::json!({
+        "agent_id": &agent_id,
+        "pid": pid,
+        "task_id": eval_task_id,
+        "executor": "eval",
+        "model": evaluator_model,
+        "started_at": Utc::now().to_rfc3339(),
+    });
+    let metadata_path = output_dir.join("metadata.json");
+    fs::write(&metadata_path, serde_json::to_string_pretty(&metadata)?)
+        .with_context(|| format!("Failed to write eval metadata: {:?}", metadata_path))?;
 
     // Register in agent registry for dead-agent detection
     locked_registry.register_agent_with_model(
@@ -2933,6 +2951,11 @@ fi
 exit $EXIT_CODE"#,
     );
 
+    // Persist the wrapper script so the agent dir is never empty.
+    let wrapper_path = output_dir.join("run.sh");
+    fs::write(&wrapper_path, &script)
+        .with_context(|| format!("Failed to write assign wrapper script: {:?}", wrapper_path))?;
+
     // Fork the process
     let assign_config = Config::load_or_default(dir);
     let bash_path =
@@ -2997,6 +3020,18 @@ exit $EXIT_CODE"#,
     };
 
     let pid = child.id();
+
+    // Write metadata (after spawn so we have the PID).
+    let metadata = serde_json::json!({
+        "agent_id": &agent_id,
+        "pid": pid,
+        "task_id": assign_task_id,
+        "executor": "eval",
+        "started_at": Utc::now().to_rfc3339(),
+    });
+    let metadata_path = output_dir.join("metadata.json");
+    fs::write(&metadata_path, serde_json::to_string_pretty(&metadata)?)
+        .with_context(|| format!("Failed to write assign metadata: {:?}", metadata_path))?;
 
     // Register in agent registry for dead-agent detection
     locked_registry.register_agent_with_model(
@@ -6202,5 +6237,112 @@ mod tests {
         let mut graph = workgraph::parser::load_graph(&graph_path).unwrap();
         let modified = build_separate_verify_tasks(dir.path(), &mut graph, &config);
         assert!(!modified, "should not create verify task for system tasks");
+    }
+
+    #[test]
+    fn test_eval_inline_writes_run_sh_immediately() {
+        let dir = tempdir().unwrap();
+        let wg_dir = dir.path();
+
+        // Create graph with an Open eval task
+        let graph_path = wg_dir.join("graph.jsonl");
+        let mut graph = WorkGraph::new();
+        let mut eval_task = Task::default();
+        eval_task.id = ".evaluate-test-task".to_string();
+        eval_task.title = "Evaluate test-task".to_string();
+        eval_task.status = Status::Open;
+        eval_task.tags = vec!["evaluation".to_string()];
+        eval_task.exec = Some("wg evaluate run test-task".to_string());
+        graph.add_node(Node::Task(eval_task));
+        save_graph(&graph, &graph_path).unwrap();
+
+        // Create agents dir and registry
+        let agents_dir = wg_dir.join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        let registry = AgentRegistry::load_locked(wg_dir).unwrap();
+        registry.save().unwrap();
+
+        // Spawn eval inline
+        let result = spawn_eval_inline(wg_dir, ".evaluate-test-task", None);
+        assert!(result.is_ok(), "spawn_eval_inline failed: {:?}", result.err());
+
+        let (agent_id, _pid) = result.unwrap();
+        let agent_dir = agents_dir.join(&agent_id);
+
+        // Core assertion: run.sh must exist immediately after spawn
+        let run_sh = agent_dir.join("run.sh");
+        assert!(
+            run_sh.exists(),
+            "run.sh should exist in agent dir {} immediately after spawn",
+            agent_dir.display()
+        );
+
+        // metadata.json should also exist
+        let metadata = agent_dir.join("metadata.json");
+        assert!(
+            metadata.exists(),
+            "metadata.json should exist in agent dir {} immediately after spawn",
+            agent_dir.display()
+        );
+
+        // Verify metadata contents are reasonable
+        let meta_content: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&metadata).unwrap()).unwrap();
+        assert_eq!(meta_content["agent_id"], agent_id);
+        assert_eq!(meta_content["task_id"], ".evaluate-test-task");
+        assert_eq!(meta_content["executor"], "eval");
+    }
+
+    #[test]
+    fn test_assign_inline_writes_run_sh_immediately() {
+        let dir = tempdir().unwrap();
+        let wg_dir = dir.path();
+
+        // Create graph with an Open assign task
+        let graph_path = wg_dir.join("graph.jsonl");
+        let mut graph = WorkGraph::new();
+        let mut assign_task = Task::default();
+        assign_task.id = ".assign-test-task".to_string();
+        assign_task.title = "Assign test-task".to_string();
+        assign_task.status = Status::Open;
+        assign_task.tags = vec!["assignment".to_string()];
+        assign_task.exec = Some("wg assign test-task --auto".to_string());
+        graph.add_node(Node::Task(assign_task));
+        save_graph(&graph, &graph_path).unwrap();
+
+        // Create agents dir and registry
+        let agents_dir = wg_dir.join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        let registry = AgentRegistry::load_locked(wg_dir).unwrap();
+        registry.save().unwrap();
+
+        // Spawn assign inline
+        let result = spawn_assign_inline(wg_dir, ".assign-test-task");
+        assert!(result.is_ok(), "spawn_assign_inline failed: {:?}", result.err());
+
+        let (agent_id, _pid) = result.unwrap();
+        let agent_dir = agents_dir.join(&agent_id);
+
+        // Core assertion: run.sh must exist immediately after spawn
+        let run_sh = agent_dir.join("run.sh");
+        assert!(
+            run_sh.exists(),
+            "run.sh should exist in agent dir {} immediately after spawn",
+            agent_dir.display()
+        );
+
+        // metadata.json should also exist
+        let metadata = agent_dir.join("metadata.json");
+        assert!(
+            metadata.exists(),
+            "metadata.json should exist in agent dir {} immediately after spawn",
+            agent_dir.display()
+        );
+
+        let meta_content: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&metadata).unwrap()).unwrap();
+        assert_eq!(meta_content["agent_id"], agent_id);
+        assert_eq!(meta_content["task_id"], ".assign-test-task");
+        assert_eq!(meta_content["executor"], "eval");
     }
 }
