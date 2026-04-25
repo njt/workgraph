@@ -141,7 +141,9 @@ pub fn archive_agent(dir: &Path, task_id: &str, agent_id: &str) -> Result<PathBu
         anyhow::bail!("Agent directory not found: {}", agent_dir.display());
     }
 
-    let timestamp = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let timestamp = Utc::now()
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        .replace(':', "-");
     let archive_dir = agent_archive_dir(dir, task_id).join(&timestamp);
     fs::create_dir_all(&archive_dir).with_context(|| {
         format!(
@@ -772,5 +774,32 @@ mod tests {
 
         let result = run_agent(&dir, "task-1", true);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_archive_dir_windows_safe() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(".workgraph");
+        fs::create_dir_all(&dir).unwrap();
+
+        let agent_dir = dir.join("agents").join("agent-1");
+        fs::create_dir_all(&agent_dir).unwrap();
+        fs::write(agent_dir.join("output.log"), "test").unwrap();
+
+        let archive_path = archive_agent(&dir, "task-1", "agent-1").unwrap();
+
+        let dir_name = archive_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        let windows_forbidden = [':', '<', '>', '"', '|', '?', '*'];
+        for ch in &windows_forbidden {
+            assert!(
+                !dir_name.contains(*ch),
+                "Archive dir name contains forbidden character '{}': {}",
+                ch,
+                dir_name
+            );
+        }
     }
 }
