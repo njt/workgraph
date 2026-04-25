@@ -9,6 +9,7 @@ use workgraph::graph::{
 };
 use workgraph::graph::{Task, parse_delay};
 use workgraph::parser::modify_graph;
+use workgraph::platform_bash;
 use workgraph::query;
 use workgraph::service::registry::AgentRegistry;
 
@@ -330,6 +331,86 @@ fn map_file_to_test_command(file: &str) -> Option<String> {
     None
 }
 
+/// On Windows, Git bash prepends /usr/bin (containing a GNU link.exe) to PATH,
+/// shadowing MSVC's link.exe and breaking cargo/rustc linking. Reorder PATH so
+/// Git-internal directories come after Windows system directories.
+#[cfg(windows)]
+fn sanitize_verify_path(cmd: &mut std::process::Command) {
+    let path = match std::env::var("PATH") {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let new_path = compute_sanitized_path(&path);
+    if new_path != path {
+        cmd.env("PATH", new_path);
+    }
+}
+
+/// Reorder `PATH` so that Git bash / Git for Windows internal `bin` directories
+/// (which bundle GNU coreutils whose names collide with MSVC tools — most
+/// notably `link.exe`) are moved to the end. Returns the path unchanged when
+/// no such entries are detected.
+///
+/// Pure function so it can be tested without mutating process env.
+fn compute_sanitized_path(path: &str) -> String {
+    // PATH separator: ';' on native Windows, ':' inside Git bash.
+    let sep = if path.contains(';') { ';' } else { ':' };
+
+    let mut system_entries = Vec::new();
+    let mut git_entries = Vec::new();
+
+    for entry in path.split(sep) {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if is_git_internal_path(trimmed) {
+            git_entries.push(trimmed);
+        } else {
+            system_entries.push(trimmed);
+        }
+    }
+
+    if git_entries.is_empty() {
+        return path.to_string();
+    }
+
+    system_entries.extend(git_entries);
+    system_entries.join(&sep.to_string())
+}
+
+/// Decide whether a PATH entry points at a Git for Windows / MSYS internal
+/// `bin` directory whose contents shadow MSVC binaries (`link.exe`, etc.).
+///
+/// Recognises both forms the daemon may see at runtime:
+/// * **Unix-style** (`/usr/bin`, `/bin`, …) — what Git bash exposes to its own
+///   shell. Matches by exact equality, preserving prior behaviour.
+/// * **Windows-style** (`C:\Program Files\Git\usr\bin`, …) — what a native
+///   Windows process inherits when launched via `cmd` / `wgdaemon.bat`.
+///   Requires both a `git` path component AND a known internal bin suffix so
+///   that unrelated directories ending in `/bin` are not demoted.
+fn is_git_internal_path(entry: &str) -> bool {
+    let normalized = entry.trim().to_lowercase().replace('\\', "/");
+    let normalized = normalized.trim_end_matches('/');
+
+    // Unix-style absolute paths inside Git bash itself.
+    if matches!(
+        normalized,
+        "/usr/bin" | "/usr/local/bin" | "/mingw64/bin" | "/bin"
+    ) {
+        return true;
+    }
+
+    // Windows-style Git for Windows install paths. Require both a `/git/`
+    // path component and a known internal bin suffix.
+    if normalized.contains("/git/") {
+        let bin_suffixes = ["/bin", "/usr/bin", "/usr/local/bin", "/mingw64/bin"];
+        return bin_suffixes.iter().any(|s| normalized.ends_with(s));
+    }
+
+    false
+}
+
 /// Generate a scoped verify command if conditions are met.
 /// Returns the scoped command or None to fall back to original.
 fn generate_scoped_verify_command(
@@ -508,15 +589,20 @@ fn run_verify_command(
         return run_llm_verify_evaluation(&effective_cmd, task, project_root);
     }
 
-    let mut child = match Command::new("sh")
-        .arg("-c")
+    let bash_path = platform_bash::bash_exe_path(None).unwrap_or_else(|_| "sh".into());
+    let mut cmd = Command::new(&bash_path);
+    cmd.arg("-c")
         .arg(&effective_cmd)
         .current_dir(project_root)
-        .env("TERM", "dumb") // Set TERM=dumb to avoid terminal-related failures
+        .env("TERM", "dumb")
+        .env_remove("BASH_XTRACEFD")
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
+        .stderr(std::process::Stdio::piped());
+
+    #[cfg(windows)]
+    sanitize_verify_path(&mut cmd);
+
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             return Err(VerifyOutput {
@@ -3134,5 +3220,116 @@ mod tests {
             Some("30m".to_string()),
             "Deferred task should inherit verify timeout"
         );
+    }
+
+    // ---------- sanitize_verify_path / Git-shadow PATH handling ----------
+
+    #[test]
+    fn test_is_git_internal_path_unix_style() {
+        // What Git bash itself exposes to scripts running inside it.
+        assert!(is_git_internal_path("/usr/bin"));
+        assert!(is_git_internal_path("/usr/local/bin"));
+        assert!(is_git_internal_path("/mingw64/bin"));
+        assert!(is_git_internal_path("/bin"));
+        // Trailing slash and surrounding whitespace must still match.
+        assert!(is_git_internal_path("/usr/bin/"));
+        assert!(is_git_internal_path("  /usr/bin  "));
+    }
+
+    #[test]
+    fn test_is_git_internal_path_windows_git_for_windows() {
+        // System-wide install.
+        assert!(is_git_internal_path(r"C:\Program Files\Git\bin"));
+        assert!(is_git_internal_path(r"C:\Program Files\Git\usr\bin"));
+        assert!(is_git_internal_path(r"C:\Program Files\Git\usr\local\bin"));
+        assert!(is_git_internal_path(r"C:\Program Files\Git\mingw64\bin"));
+        // Per-user install (newer Git for Windows installer default).
+        assert!(is_git_internal_path(
+            r"C:\Users\Someone\AppData\Local\Programs\Git\usr\bin"
+        ));
+        // Mingw-style path that bash sometimes emits in subprocess env.
+        assert!(is_git_internal_path("/c/program files/git/usr/bin"));
+        // Case-insensitive on Windows.
+        assert!(is_git_internal_path(r"C:\PROGRAM FILES\GIT\USR\BIN"));
+    }
+
+    #[test]
+    fn test_is_git_internal_path_rejects_unrelated_dirs() {
+        // Random `bin` dirs must not be demoted.
+        assert!(!is_git_internal_path(r"C:\MyApp\bin"));
+        assert!(!is_git_internal_path(r"C:\Tools\Node\bin"));
+        // MSVC bin must obviously not be demoted.
+        assert!(!is_git_internal_path(
+            r"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.50\bin\HostX64\x64"
+        ));
+        // Substring "git" inside another word must not match.
+        assert!(!is_git_internal_path(r"C:\Tools\getgit\bin"));
+        assert!(!is_git_internal_path(r"C:\Tools\digit\bin"));
+        // Non-bin Git subdirs must not match.
+        assert!(!is_git_internal_path(r"C:\Program Files\Git\cmd"));
+        assert!(!is_git_internal_path(r"C:\Program Files\Git"));
+        // Empty / whitespace.
+        assert!(!is_git_internal_path(""));
+        assert!(!is_git_internal_path("   "));
+    }
+
+    #[test]
+    fn test_compute_sanitized_path_demotes_windows_git_bin() {
+        // Realistic Windows-style PATH where Git's coreutils shadow MSVC's
+        // link.exe — the exact failure mode that bit fix-windows-archive and
+        // eval-inline-agents earlier in this dogfood session.
+        let input = r"C:\Users\Nat\bin;C:\Program Files\Git\mingw64\bin;C:\Program Files\Git\usr\bin;C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.50\bin\HostX64\x64";
+        let output = compute_sanitized_path(input);
+
+        // MSVC bin must precede Git bin entries after sanitisation.
+        let msvc_pos = output.find("MSVC").expect("MSVC entry preserved");
+        let mingw_pos = output.find("mingw64").expect("mingw64 entry preserved");
+        let usr_pos = output.find(r"Git\usr\bin").expect("Git\\usr\\bin preserved");
+        assert!(
+            msvc_pos < mingw_pos && msvc_pos < usr_pos,
+            "MSVC bin should precede all Git internal bin entries; got: {output}"
+        );
+        // The user-bin entry, which is not Git-internal, must still come first.
+        let user_pos = output.find(r"Users\Nat\bin").expect("user bin preserved");
+        assert!(
+            user_pos < mingw_pos,
+            "Non-Git system entries must keep their relative order; got: {output}"
+        );
+        // Separator must be preserved. Drive-letter `:` is not a separator;
+        // count semicolons to confirm we still have 4 entries / 3 joins.
+        assert_eq!(
+            output.matches(';').count(),
+            3,
+            "expected 3 semicolon separators between 4 entries; got: {output}"
+        );
+    }
+
+    #[test]
+    fn test_compute_sanitized_path_unix_style_unchanged_behavior() {
+        // Inside Git bash itself — Unix-style entries with colon separator.
+        // This was the only case the original implementation handled, and the
+        // refactor must keep handling it.
+        let input = "/usr/bin:/c/msvc/bin:/usr/local/bin";
+        let output = compute_sanitized_path(input);
+
+        let msvc_pos = output.find("/c/msvc/bin").expect("msvc preserved");
+        let usr_bin_pos = output.find("/usr/bin").expect("/usr/bin preserved");
+        let usr_local_pos = output.find("/usr/local/bin").expect("/usr/local/bin preserved");
+        assert!(
+            msvc_pos < usr_bin_pos && msvc_pos < usr_local_pos,
+            "Git-internal entries must be demoted; got: {output}"
+        );
+        assert!(output.contains(':'));
+        assert!(!output.contains(';'));
+    }
+
+    #[test]
+    fn test_compute_sanitized_path_no_git_entries_returns_unchanged() {
+        // No Git-internal entries → function must be a no-op so we don't
+        // accidentally rewrite PATH for non-Windows tools that depend on the
+        // exact original ordering.
+        let input = r"C:\Users\Nat\bin;C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.50\bin\HostX64\x64;C:\Tools\Node\bin";
+        let output = compute_sanitized_path(input);
+        assert_eq!(output, input);
     }
 }
