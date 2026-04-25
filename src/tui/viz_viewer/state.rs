@@ -14632,7 +14632,7 @@ mod hud_tests {
         let archive_base = tmp.path().join("log").join("agents").join("cycle-task");
         std::fs::create_dir_all(&archive_base).unwrap();
         for i in 0..iteration_count {
-            let ts = format!("2026-01-15T10:{:02}:00Z", i);
+            let ts = format!("2026-01-15T10-{:02}-00Z", i);
             let iter_dir = archive_base.join(&ts);
             std::fs::create_dir_all(&iter_dir).unwrap();
             std::fs::write(
@@ -14816,7 +14816,7 @@ mod hud_tests {
         let archive_base = tmp.path().join("log").join("agents").join("retry-task");
         std::fs::create_dir_all(&archive_base).unwrap();
         for i in 0..2 {
-            let ts = format!("2026-01-15T10:{:02}:00Z", i);
+            let ts = format!("2026-01-15T10-{:02}-00Z", i);
             let iter_dir = archive_base.join(&ts);
             std::fs::create_dir_all(&iter_dir).unwrap();
             std::fs::write(iter_dir.join("output.txt"), format!("Attempt {}", i + 1)).unwrap();

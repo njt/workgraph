@@ -238,10 +238,11 @@ mod tests {
         // Set up target store
         let target = setup_store(&tmp, "target");
 
-        // Write federation.yaml with a named remote pointing to target
+        // Write federation.yaml with a named remote pointing to target (forward slashes for YAML)
+        let target_path_str = target.store_path().display().to_string().replace('\\', "/");
         let federation_yaml = format!(
             "remotes:\n  downstream:\n    path: \"{}\"\n    description: \"test remote\"\n",
-            target.store_path().display()
+            target_path_str
         );
         std::fs::write(wg_dir.join("federation.yaml"), federation_yaml).unwrap();
 

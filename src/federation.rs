@@ -234,8 +234,25 @@ pub fn resolve_store(reference: &str) -> Result<LocalStore, anyhow::Error> {
         std::env::current_dir()?.join(expanded)
     };
 
-    // Canonicalize if it exists
-    let path = path.canonicalize().unwrap_or(path);
+    // Canonicalize if it exists, stripping Windows \\?\ extended-path prefix
+    let path = match path.canonicalize() {
+        Ok(p) => {
+            #[cfg(windows)]
+            {
+                let s = p.to_string_lossy();
+                if let Some(stripped) = s.strip_prefix(r"\\?\") {
+                    PathBuf::from(stripped)
+                } else {
+                    p
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                p
+            }
+        }
+        Err(_) => path,
+    };
 
     // Check for agency store in several locations:
     // 1. path itself is the agency dir (has roles/ or cache/roles/ or evaluations/)

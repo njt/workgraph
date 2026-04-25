@@ -236,9 +236,9 @@ pub(crate) fn discover_test_files(project_root: &Path) -> Vec<String> {
             };
             for (pattern, _) in TEST_FILE_PATTERNS {
                 if glob_match(pattern, &file_name) {
-                    // Make path relative to project root
+                    // Make path relative to project root, with forward slashes for portability
                     if let Ok(rel) = path.strip_prefix(project_root) {
-                        let rel_str = rel.to_string_lossy().to_string();
+                        let rel_str = rel.to_string_lossy().replace('\\', "/");
                         if !found.contains(&rel_str) {
                             found.push(rel_str);
                         }
@@ -1761,7 +1761,7 @@ mod tests {
             .join("log")
             .join("agents")
             .join("t1")
-            .join("2026-03-07T10:00:00Z");
+            .join("2026-03-07T10-00-00Z");
         std::fs::create_dir_all(&archive_dir).unwrap();
         std::fs::write(
             archive_dir.join("output.txt"),
@@ -1777,7 +1777,7 @@ mod tests {
             "Should contain header"
         );
         assert!(
-            result.contains("2026-03-07T10:00:00Z"),
+            result.contains("2026-03-07T10-00-00Z"),
             "Should contain archive timestamp"
         );
         assert!(
@@ -1801,7 +1801,7 @@ mod tests {
             .join("log")
             .join("agents")
             .join("t1")
-            .join("2026-03-07T10:00:00Z");
+            .join("2026-03-07T10-00-00Z");
         std::fs::create_dir_all(&archive_dir).unwrap();
         std::fs::write(archive_dir.join("output.txt"), "   \n\n  ").unwrap();
 
@@ -1826,7 +1826,7 @@ mod tests {
             .join("log")
             .join("agents")
             .join("t1")
-            .join("2026-03-06T10:00:00Z");
+            .join("2026-03-06T10-00-00Z");
         std::fs::create_dir_all(&old_archive).unwrap();
         std::fs::write(old_archive.join("output.txt"), "Old agent output").unwrap();
 
@@ -1834,7 +1834,7 @@ mod tests {
             .join("log")
             .join("agents")
             .join("t1")
-            .join("2026-03-07T10:00:00Z");
+            .join("2026-03-07T10-00-00Z");
         std::fs::create_dir_all(&new_archive).unwrap();
         std::fs::write(new_archive.join("output.txt"), "New agent output").unwrap();
 
@@ -1862,7 +1862,7 @@ mod tests {
             .join("log")
             .join("agents")
             .join("t1")
-            .join("2026-03-07T10:00:00Z");
+            .join("2026-03-07T10-00-00Z");
         std::fs::create_dir_all(&archive_dir).unwrap();
         std::fs::write(archive_dir.join("output.txt"), "Some output").unwrap();
 
@@ -1912,7 +1912,7 @@ mod tests {
             .join("log")
             .join("agents")
             .join("t1")
-            .join("2026-03-07T10:00:00Z");
+            .join("2026-03-07T10-00-00Z");
         std::fs::create_dir_all(&archive_dir).unwrap();
 
         let mut task = make_task("t1", "Test task");
