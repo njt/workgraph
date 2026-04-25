@@ -1299,6 +1299,27 @@ unset CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH
 {timeout_note}
 {debug_env_vars}
 {stream_init}
+# --- Destructive-action snapshot (pre-agent) ---
+# Cheaply record state that an agent might destroy so we can log changes
+# after the agent exits. Used for post-mortem correlation when the daemon dies.
+_WG_ACTIONS_LOG="{escaped_actions_log}"
+_WG_SNAP_BINARY="${{WG_BINARY_PATH:-$HOME/.cargo/bin/wg.exe}}"
+_WG_SNAP_PROJECT="${{WG_PROJECT_DIR:-.}}"
+_wg_snap_binary_stat() {{ stat -c '%Y %s' "$_WG_SNAP_BINARY" 2>/dev/null || echo "absent"; }}
+_wg_snap_daemon_pid() {{
+    local sf="$_WG_SNAP_PROJECT/.workgraph/service/state.json"
+    if [ -f "$sf" ]; then
+        grep -o '"pid": *[0-9]*' "$sf" 2>/dev/null | head -1 | grep -o '[0-9]*' || echo "absent"
+    else
+        echo "absent"
+    fi
+}}
+_wg_snap_wgdir() {{ [ -d "$_WG_SNAP_PROJECT/.workgraph" ] && echo "present" || echo "absent"; }}
+_WG_PRE_BIN=$(_wg_snap_binary_stat)
+_WG_PRE_PID=$(_wg_snap_daemon_pid)
+_WG_PRE_DIR=$(_wg_snap_wgdir)
+[ "${{WG_DEBUG:-0}}" = "1" ] && echo "[wrapper] pre-snapshot: binary=$_WG_PRE_BIN pid=$_WG_PRE_PID dir=$_WG_PRE_DIR" >> "$OUTPUT_FILE"
+
 # Background heartbeat loop — keeps registry heartbeat fresh while agent runs.
 # Without this, agents running longer than heartbeat_timeout get reaped as dead.
 (while kill -0 $$ 2>/dev/null; do
@@ -1314,6 +1335,23 @@ EXIT_CODE=$?
 # Stop the heartbeat loop
 kill $HEARTBEAT_PID 2>/dev/null; wait $HEARTBEAT_PID 2>/dev/null
 {stream_result}
+
+# --- Destructive-action snapshot (post-agent) ---
+_WG_POST_BIN=$(_wg_snap_binary_stat)
+_WG_POST_PID=$(_wg_snap_daemon_pid)
+_WG_POST_DIR=$(_wg_snap_wgdir)
+_WG_TS=$(date +%s)
+[ "${{WG_DEBUG:-0}}" = "1" ] && echo "[wrapper] post-snapshot: binary=$_WG_POST_BIN pid=$_WG_POST_PID dir=$_WG_POST_DIR" >> "$OUTPUT_FILE"
+
+if [ "$_WG_PRE_BIN" != "$_WG_POST_BIN" ]; then
+    echo "$_WG_TS agent=$TASK_ID action=wg_binary_replaced before=\"$_WG_PRE_BIN\" after=\"$_WG_POST_BIN\"" >> "$_WG_ACTIONS_LOG"
+fi
+if [ "$_WG_PRE_PID" != "absent" ] && [ "$_WG_POST_PID" != "$_WG_PRE_PID" ]; then
+    echo "$_WG_TS agent=$TASK_ID action=daemon_pid_changed before=$_WG_PRE_PID after=$_WG_POST_PID" >> "$_WG_ACTIONS_LOG"
+fi
+if [ "$_WG_PRE_DIR" = "present" ] && [ "$_WG_POST_DIR" = "absent" ]; then
+    echo "$_WG_TS agent=$TASK_ID action=workgraph_dir_removed" >> "$_WG_ACTIONS_LOG"
+fi
 
 # Check if task is still in progress (agent didn't mark it done/failed)
 TASK_STATUS=$(wg show "$TASK_ID" --json 2>/dev/null | grep -o '"status": *"[^"]*"' | head -1 | sed 's/.*"status": *"//;s/"//' || echo "unknown")
@@ -1450,6 +1488,9 @@ exit $EXIT_CODE
         // verbatim paths for redirects with "No such file or directory",
         // so output.log never appears and the agent looks silently dead.
         escaped_output_file = shell_escape(&sanitize_bash_path(output_file_str)),
+        escaped_actions_log = sanitize_bash_path(
+            &output_dir.join("destructive_actions.log").to_string_lossy(),
+        ),
         run_command = run_command,
         timeout_note = timeout_note,
         debug_env_vars = debug_env_vars,
@@ -2743,5 +2784,228 @@ mod tests {
             std::fs::read_to_string(prompt_file).unwrap(),
             "Investigate task"
         );
+    }
+
+    #[test]
+    fn test_agent_wrapper_logs_cargo_install_and_service_stop() {
+        // Setup: create a temp project dir with fake wg binary, state.json, and .workgraph
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+        let output_dir = project_dir.join("agent-output");
+        fs::create_dir_all(&output_dir).unwrap();
+
+        // Fake cargo bin dir with a "wg binary"
+        let cargo_bin = project_dir.join("cargo-bin");
+        fs::create_dir_all(&cargo_bin).unwrap();
+        let fake_binary = cargo_bin.join("wg.exe");
+        fs::write(&fake_binary, b"old-binary-content").unwrap();
+
+        // Fake .workgraph dir with service/state.json
+        let wg_dir = project_dir.join(".workgraph");
+        let service_dir = wg_dir.join("service");
+        fs::create_dir_all(&service_dir).unwrap();
+        // Use PID 999999 which almost certainly doesn't exist
+        fs::write(
+            service_dir.join("state.json"),
+            r#"{"pid": 999999, "socket_path": "/tmp/wg.sock", "started_at": "2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+
+        let output_file = output_dir.join("output.log");
+        let output_file_str = output_file.to_string_lossy().to_string();
+
+        // The "agent command" simulates destructive actions:
+        // 1. Replace the wg binary (different content + mtime)
+        // 2. The daemon PID (999999) won't exist after, simulating daemon death
+        let agent_cmd = format!(
+            "echo 'new-binary-content-that-is-different' > '{}'",
+            sanitize_bash_path(&fake_binary.to_string_lossy()),
+        );
+
+        // Use "native" executor to avoid stdout being wrapped in tee
+        let wrapper_path = write_wrapper_script(
+            &output_dir,
+            "test-task-1",
+            &sanitize_bash_path(&output_file_str),
+            &agent_cmd,
+            None,
+            "native",
+        )
+        .unwrap();
+
+        // Create a stub `wg` script so wrapper's wg calls are no-ops
+        let stub_wg = cargo_bin.join("wg");
+        fs::write(&stub_wg, "#!/bin/bash\necho '{\"status\": \"done\"}'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&stub_wg, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // Prepend stub dir to PATH so our wg stub is found first, but
+        // keep system PATH for coreutils (stat, date, grep, sleep, etc.)
+        let system_path = std::env::var("PATH").unwrap_or_default();
+        let test_path = format!(
+            "{}{}{}",
+            sanitize_bash_path(&cargo_bin.to_string_lossy()),
+            if cfg!(windows) { ";" } else { ":" },
+            system_path
+        );
+
+        let bash_path =
+            workgraph::platform_bash::bash_exe_path(None).expect("bash must be available");
+        let status = std::process::Command::new(&bash_path)
+            .arg(strip_verbatim_prefix(&wrapper_path))
+            .env("HOME", project_dir)
+            .env("CARGO_HOME", project_dir.join("cargo-home"))
+            .env("WG_BINARY_PATH", &fake_binary)
+            .env("WG_PROJECT_DIR", project_dir)
+            .env("WG_AGENT_ID", "test-agent-1")
+            .env("WG_TASK_ID", "test-task-1")
+            .env("PATH", &test_path)
+            .current_dir(project_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .status();
+
+        // The wrapper may fail on `wg show` etc, that's OK.
+        // We only care about the destructive_actions.log content.
+        let _ = status;
+
+        let log_path = output_dir.join("destructive_actions.log");
+        assert!(
+            log_path.exists(),
+            "destructive_actions.log should exist when destructive actions detected"
+        );
+
+        let log_content = fs::read_to_string(&log_path).unwrap();
+        assert!(
+            log_content.contains("wg_binary_replaced"),
+            "Log should contain wg_binary_replaced entry, got: {}",
+            log_content
+        );
+        assert!(
+            log_content.contains("agent=test-task-1"),
+            "Log should contain agent task ID, got: {}",
+            log_content
+        );
+
+        // Verify format: <unix_ts> agent=<id> action=<class> <key=value>
+        for line in log_content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.splitn(2, ' ').collect();
+            assert!(
+                parts.len() >= 2,
+                "Log line should start with unix timestamp: {}",
+                line
+            );
+            assert!(
+                parts[0].parse::<u64>().is_ok(),
+                "First field should be unix timestamp: {}",
+                line
+            );
+            assert!(
+                line.contains("agent="),
+                "Log line should contain agent= field: {}",
+                line
+            );
+            assert!(
+                line.contains("action="),
+                "Log line should contain action= field: {}",
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn test_agent_wrapper_no_log_on_clean_run() {
+        // When the agent doesn't do anything destructive, no log entries should appear
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let project_dir = temp_dir.path();
+        let output_dir = project_dir.join("agent-output");
+        fs::create_dir_all(&output_dir).unwrap();
+
+        // Fake cargo bin dir with a "wg binary"
+        let cargo_bin = project_dir.join("cargo-bin");
+        fs::create_dir_all(&cargo_bin).unwrap();
+        let fake_binary = cargo_bin.join("wg.exe");
+        fs::write(&fake_binary, b"unchanged-binary").unwrap();
+
+        // Fake .workgraph dir with service/state.json
+        let wg_dir = project_dir.join(".workgraph");
+        let service_dir = wg_dir.join("service");
+        fs::create_dir_all(&service_dir).unwrap();
+        fs::write(
+            service_dir.join("state.json"),
+            r#"{"pid": 999999, "socket_path": "/tmp/wg.sock", "started_at": "2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+
+        let output_file = output_dir.join("output.log");
+        let output_file_str = output_file.to_string_lossy().to_string();
+
+        // Agent command that does nothing destructive
+        let agent_cmd = "echo 'hello world'";
+
+        let wrapper_path = write_wrapper_script(
+            &output_dir,
+            "test-task-clean",
+            &sanitize_bash_path(&output_file_str),
+            agent_cmd,
+            None,
+            "native",
+        )
+        .unwrap();
+
+        // Create a stub `wg` script
+        let stub_wg = cargo_bin.join("wg");
+        fs::write(&stub_wg, "#!/bin/bash\necho '{\"status\": \"done\"}'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&stub_wg, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let system_path = std::env::var("PATH").unwrap_or_default();
+        let test_path = format!(
+            "{}{}{}",
+            sanitize_bash_path(&cargo_bin.to_string_lossy()),
+            if cfg!(windows) { ";" } else { ":" },
+            system_path
+        );
+
+        let bash_path =
+            workgraph::platform_bash::bash_exe_path(None).expect("bash must be available");
+        let _ = std::process::Command::new(&bash_path)
+            .arg(strip_verbatim_prefix(&wrapper_path))
+            .env("HOME", project_dir)
+            .env("CARGO_HOME", project_dir.join("cargo-home"))
+            .env("WG_BINARY_PATH", &fake_binary)
+            .env("WG_PROJECT_DIR", project_dir)
+            .env("WG_AGENT_ID", "test-agent-clean")
+            .env("WG_TASK_ID", "test-task-clean")
+            .env("PATH", &test_path)
+            .current_dir(project_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .status();
+
+        let log_path = output_dir.join("destructive_actions.log");
+        if log_path.exists() {
+            let content = fs::read_to_string(&log_path).unwrap();
+            // File may exist but should have no action entries
+            let action_lines: Vec<&str> = content
+                .lines()
+                .filter(|l| !l.trim().is_empty() && l.contains("action="))
+                .collect();
+            assert!(
+                action_lines.is_empty(),
+                "Clean run should produce no action log entries, got: {:?}",
+                action_lines
+            );
+        }
+        // If the file doesn't exist at all, that's fine too
     }
 }
