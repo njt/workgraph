@@ -21,6 +21,8 @@ pub enum ParseError {
 struct FileLock {
     #[cfg(unix)]
     file: File,
+    #[cfg(windows)]
+    file: File,
 }
 
 impl FileLock {
@@ -30,10 +32,13 @@ impl FileLock {
         Self::flock_impl(&lock_path, libc::LOCK_EX)
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    fn acquire<P: AsRef<Path>>(lock_path: P) -> Result<Self, ParseError> {
+        Self::lockfileex_impl(&lock_path, windows_sys::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK)
+    }
+
+    #[cfg(not(any(unix, windows)))]
     fn acquire<P: AsRef<Path>>(_lock_path: P) -> Result<Self, ParseError> {
-        // On non-Unix systems, we can't use flock - return a no-op lock
-        // This is a limitation but workgraph is primarily for Unix systems
         Ok(FileLock {})
     }
 
@@ -73,7 +78,53 @@ impl FileLock {
         Ok(Some(FileLock { file }))
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    fn try_acquire_shared<P: AsRef<Path>>(lock_path: P) -> Result<Option<Self>, ParseError> {
+        use std::os::windows::io::AsRawHandle;
+
+        if let Some(parent) = lock_path.as_ref().parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+
+        let handle = file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        let mut overlapped: windows_sys::Win32::System::IO::OVERLAPPED = unsafe { std::mem::zeroed() };
+
+        let flags = windows_sys::Win32::Storage::FileSystem::LOCKFILE_FAIL_IMMEDIATELY;
+
+        let result = unsafe {
+            windows_sys::Win32::Storage::FileSystem::LockFileEx(
+                handle,
+                flags,
+                0,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            )
+        };
+
+        if result == 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION as i32) {
+                return Ok(None);
+            }
+            return Err(ParseError::Lock(format!(
+                "Failed to acquire shared lock on {:?}: {}",
+                lock_path.as_ref(),
+                err
+            )));
+        }
+
+        Ok(Some(FileLock { file }))
+    }
+
+    #[cfg(not(any(unix, windows)))]
     fn try_acquire_shared<P: AsRef<Path>>(_lock_path: P) -> Result<Option<Self>, ParseError> {
         Ok(Some(FileLock {}))
     }
@@ -109,6 +160,49 @@ impl FileLock {
 
         Ok(FileLock { file })
     }
+
+    #[cfg(windows)]
+    fn lockfileex_impl<P: AsRef<Path>>(
+        lock_path: P,
+        flags: u32,
+    ) -> Result<Self, ParseError> {
+        use std::os::windows::io::AsRawHandle;
+
+        if let Some(parent) = lock_path.as_ref().parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+
+        let handle = file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        let mut overlapped: windows_sys::Win32::System::IO::OVERLAPPED = unsafe { std::mem::zeroed() };
+
+        let result = unsafe {
+            windows_sys::Win32::Storage::FileSystem::LockFileEx(
+                handle,
+                flags,
+                0,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            )
+        };
+
+        if result == 0 {
+            return Err(ParseError::Lock(format!(
+                "Failed to acquire lock on {:?}: {}",
+                lock_path.as_ref(),
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        Ok(FileLock { file })
+    }
 }
 
 impl Drop for FileLock {
@@ -116,10 +210,24 @@ impl Drop for FileLock {
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;
-            // Release the lock (LOCK_UN) - best effort, ignore errors on drop
             let fd = self.file.as_raw_fd();
             unsafe {
                 libc::flock(fd, libc::LOCK_UN);
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            let handle = self.file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+            let mut overlapped: windows_sys::Win32::System::IO::OVERLAPPED = unsafe { std::mem::zeroed() };
+            unsafe {
+                windows_sys::Win32::Storage::FileSystem::UnlockFileEx(
+                    handle,
+                    0,
+                    u32::MAX,
+                    u32::MAX,
+                    &mut overlapped,
+                );
             }
         }
     }
@@ -771,6 +879,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_save_to_nonexistent_directory() {
         let graph = WorkGraph::new();
         let result = save_graph(&graph, "/nonexistent/deep/path/graph.jsonl");

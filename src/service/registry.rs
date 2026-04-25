@@ -287,8 +287,57 @@ impl AgentRegistry {
         })
     }
 
-    /// Load the registry with a file lock (non-Unix fallback - no actual locking)
-    #[cfg(not(unix))]
+    /// Load the registry with a file lock (Windows implementation using LockFileEx)
+    #[cfg(windows)]
+    pub fn load_locked(workgraph_dir: &Path) -> Result<LockedRegistry> {
+        use std::fs::OpenOptions;
+        use std::os::windows::io::AsRawHandle;
+
+        let service_dir = workgraph_dir.join("service");
+
+        if !service_dir.exists() {
+            fs::create_dir_all(&service_dir)?;
+        }
+
+        let lock_path = service_dir.join(".registry.lock");
+        let lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+
+        let handle = lock_file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        let mut overlapped: windows_sys::Win32::System::IO::OVERLAPPED = unsafe { std::mem::zeroed() };
+
+        let result = unsafe {
+            windows_sys::Win32::Storage::FileSystem::LockFileEx(
+                handle,
+                windows_sys::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK,
+                0,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            )
+        };
+
+        if result == 0 {
+            anyhow::bail!(
+                "Failed to acquire lock: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        let registry = Self::load(workgraph_dir)?;
+
+        Ok(LockedRegistry {
+            registry,
+            workgraph_dir: workgraph_dir.to_path_buf(),
+            _lock_file: lock_file,
+        })
+    }
+
+    #[cfg(not(any(unix, windows)))]
     pub fn load_locked(workgraph_dir: &Path) -> Result<LockedRegistry> {
         use std::fs::OpenOptions;
 
