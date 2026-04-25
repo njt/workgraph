@@ -692,6 +692,13 @@ pub(crate) fn spawn_agent_inner(
                 return false;
             }
         };
+        if !matches!(task.status, Status::Open | Status::Blocked) {
+            claim_error = Some(anyhow::anyhow!(
+                "Task '{}' is no longer spawnable (status: {:?})",
+                task_id_str, task.status
+            ));
+            return false;
+        }
         task.status = Status::InProgress;
         task.started_at = Some(Utc::now().to_rfc3339());
         task.assigned = Some(temp_agent_id_clone.clone());
