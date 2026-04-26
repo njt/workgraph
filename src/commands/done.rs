@@ -418,34 +418,52 @@ fn generate_scoped_verify_command(
     project_root: &Path,
     coordinator_config: &CoordinatorConfig,
 ) -> Option<String> {
-    // Only scope "cargo test" commands
-    if verify_cmd.trim() != "cargo test" || !coordinator_config.scoped_verify_enabled {
+    if !coordinator_config.scoped_verify_enabled {
+        return None;
+    }
+
+    let trimmed = verify_cmd.trim();
+
+    // On Windows, rewrite "cargo test <filter>" (single positional arg, no flags)
+    // to "cargo test --bin wg <filter>" so tests resolve without ambiguity.
+    #[cfg(windows)]
+    {
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() == 3
+            && parts[0] == "cargo"
+            && parts[1] == "test"
+            && !parts[2].starts_with('-')
+        {
+            return Some(format!("cargo test --bin wg {}", parts[2]));
+        }
+    }
+
+    // Existing logic: scope bare "cargo test" to modified files
+    if trimmed != "cargo test" {
         return None;
     }
 
     // Get modified files
     let modified_files = match get_modified_files(project_root) {
         Ok(files) => files,
-        Err(_) => return None, // Fall back on error
+        Err(_) => return None,
     };
 
     if modified_files.is_empty() {
-        return None; // No changes, use original command
+        return None;
     }
 
     // Map to test commands
     if let Some(test_commands) = map_files_to_tests(&modified_files) {
         if test_commands.len() == 1 {
-            // Single scoped command
             Some(test_commands.into_iter().next().unwrap())
         } else if test_commands.len() > 1 {
-            // Multiple test commands - combine them
             Some(test_commands.join(" && "))
         } else {
             None
         }
     } else {
-        None // Fall back to full test suite
+        None
     }
 }
 
@@ -3331,5 +3349,86 @@ mod tests {
         let input = r"C:\Users\Nat\bin;C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.50\bin\HostX64\x64;C:\Tools\Node\bin";
         let output = compute_sanitized_path(input);
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_generate_scoped_verify_command_rewrites_filtered_cargo_test() {
+        let dir = tempdir().unwrap();
+        let config = CoordinatorConfig {
+            scoped_verify_enabled: true,
+            ..CoordinatorConfig::default()
+        };
+
+        // "cargo test <filter>" should be rewritten on Windows only
+        let result = generate_scoped_verify_command(
+            "cargo test daemon_falls_back",
+            dir.path(),
+            &config,
+        );
+        if cfg!(windows) {
+            assert_eq!(
+                result,
+                Some("cargo test --bin wg daemon_falls_back".to_string())
+            );
+        } else {
+            assert_eq!(result, None);
+        }
+    }
+
+    #[test]
+    fn test_generate_scoped_verify_command_no_rewrite_with_flags() {
+        let dir = tempdir().unwrap();
+        let config = CoordinatorConfig {
+            scoped_verify_enabled: true,
+            ..CoordinatorConfig::default()
+        };
+
+        // Commands with flags should NOT be rewritten
+        assert_eq!(
+            generate_scoped_verify_command("cargo test --bin wg my_test", dir.path(), &config),
+            None
+        );
+        assert_eq!(
+            generate_scoped_verify_command("cargo test -- --nocapture", dir.path(), &config),
+            None
+        );
+        assert_eq!(
+            generate_scoped_verify_command("cargo test --release my_test", dir.path(), &config),
+            None
+        );
+    }
+
+    #[test]
+    fn test_generate_scoped_verify_command_no_rewrite_non_cargo() {
+        let dir = tempdir().unwrap();
+        let config = CoordinatorConfig {
+            scoped_verify_enabled: true,
+            ..CoordinatorConfig::default()
+        };
+
+        // Non-cargo commands should NOT be rewritten
+        assert_eq!(
+            generate_scoped_verify_command("npm test", dir.path(), &config),
+            None
+        );
+        assert_eq!(
+            generate_scoped_verify_command("python -m pytest", dir.path(), &config),
+            None
+        );
+    }
+
+    #[test]
+    fn test_generate_scoped_verify_command_no_rewrite_when_disabled() {
+        let dir = tempdir().unwrap();
+        let config = CoordinatorConfig {
+            scoped_verify_enabled: false,
+            ..CoordinatorConfig::default()
+        };
+
+        // Should not rewrite when scoped_verify is disabled
+        assert_eq!(
+            generate_scoped_verify_command("cargo test my_test", dir.path(), &config),
+            None
+        );
     }
 }
