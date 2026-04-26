@@ -1,0 +1,7 @@
+# v0.1.0-preview.1+win.1
+
+First Windows preview of workgraph. This release ports the entire crate from Linux-only to cross-platform, so `cargo build` and `cargo install` now work on Windows out of the box. Unix-specific APIs (signals, Unix sockets, symlinks, `chmod 600`, `$HOME`) are replaced with platform abstractions: the service daemon and TUI dump server use local named pipes, worktrees use directory junctions instead of symlinks (no Developer Mode required), key-file permissions are enforced via Windows ACLs, and home-directory resolution uses `dirs::home_dir()` everywhere. Agent spawning sets `CREATE_NEW_PROCESS_GROUP` so child processes receive clean interrupt signals, and the `\\?\` extended-path prefix that Windows APIs inject is stripped before handing paths to bash and git. A new `wg doctor` command checks your environment for common setup issues. Pre-built x86_64 Windows binaries are published to GitHub Releases for the first time, with SHA256 checksums.
+
+**What to test:** Install from the GitHub Release asset or `cargo install --path .`, run `wg doctor` to verify your environment, then try `wg service start` and confirm the daemon starts and agents spawn correctly. Check that worktrees are created as directory junctions (`dir /AL`).
+
+**Known issues:** The release pipeline does not yet produce native ARM64 binaries — ARM64 Windows users should run the x86_64 binary under emulation.
