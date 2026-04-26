@@ -1966,6 +1966,11 @@ fn run_registry_refresh(dir: &Path, refresh_error_count: &mut u64, logger: &Daem
         return; // Disabled
     }
 
+    if config.resolve_api_key_for_provider("openrouter", dir).is_err() {
+        logger.info("No openrouter API key configured, skipping registry refresh");
+        return;
+    }
+
     // Time gate: check if enough time has elapsed since the last fetch.
     {
         if let Ok(Some(existing)) = workgraph::model_benchmarks::BenchmarkRegistry::load(dir)
