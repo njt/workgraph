@@ -1,0 +1,7 @@
+# v0.1.0-preview.1+win.1
+
+First Windows preview. This tag represents the initial port of workgraph from Linux/macOS to Windows. The daemon and TUI now use named pipes instead of Unix domain sockets, worktrees use directory junctions (no Developer Mode required), and key-file permissions are enforced via Windows ACLs instead of POSIX chmod. Agent spawning received several fixes: extended-length path prefixes (`\\?\`) are stripped before handing paths to bash and git, and child processes are created with `CREATE_NEW_PROCESS_GROUP` so they no longer inherit console control events that killed them at each 60-second tick. The `$HOME` environment variable is replaced everywhere with `dirs::home_dir()` for reliable path resolution on Windows. A new `wg doctor` command checks the environment for common misconfiguration. Binary distribution is set up via a GitHub Actions release workflow producing `wg.exe` zips for x86_64 (ARM64 deferred). Two daemon reliability fixes round out the tag: `state.json` is preserved when the daemon process is alive but the socket is slow to bind, and Claude CLI error logging now captures stdout (where auth failures actually appear) alongside stderr.
+
+**What to test:** `wg service start` / `wg service stop` lifecycle, `wg doctor` output, agent task dispatch and completion, TUI connectivity.
+
+**Known issues:** ARM64 Windows binaries are not yet built in CI (BoringSSL NASM dependency). The WSL bash shim on PATH may be resolved instead of Git-for-Windows bash.
