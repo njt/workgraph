@@ -77,6 +77,7 @@ pub fn run(dir: &Path, json: bool) -> Result<()> {
     checks.extend(check_auth(dir));
     checks.extend(check_workgraph_dir(dir));
     checks.extend(check_daemon(dir));
+    checks.extend(check_cargo_target_size(dir));
     #[cfg(windows)]
     checks.extend(check_windows_specific());
 
@@ -565,7 +566,114 @@ fn is_pid_alive(pid: u32) -> bool {
     }
 }
 
+// ── cargo target/ size ───────────────────────────────────────────────
+
+const TARGET_SIZE_WARN_BYTES: u64 = 10 * 1024 * 1024 * 1024; // 10 GiB
+
+fn check_cargo_target_size(dir: &Path) -> Vec<Check> {
+    check_cargo_target_size_with_threshold(dir, TARGET_SIZE_WARN_BYTES)
+}
+
+fn check_cargo_target_size_with_threshold(dir: &Path, threshold: u64) -> Vec<Check> {
+    let project_root = match dir.parent() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+
+    if !project_root.join("Cargo.toml").exists() {
+        return Vec::new();
+    }
+
+    let target_dir = project_root.join("target");
+    if !target_dir.exists() {
+        return Vec::new();
+    }
+
+    let total_bytes: u64 = walkdir::WalkDir::new(&target_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.metadata().ok())
+        .filter(|m| m.is_file())
+        .map(|m| m.len())
+        .sum();
+
+    if total_bytes >= threshold {
+        let gib = total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        vec![Check::warn(
+            "cargo target/ size",
+            format!("target/ is {:.1} GiB", gib),
+            "Run `cargo sweep --time 14` to prune old artifacts, and add \
+             `debug = \"line-tables-only\"` to `[profile.dev]` in Cargo.toml \
+             to reduce debug info size.",
+        )]
+    } else {
+        Vec::new()
+    }
+}
+
 // Silence "unused import" on non-Windows where some helpers only apply to
 // the Windows branches above.
 #[allow(dead_code)]
 fn _unused_import_suppressor(_p: &PathBuf) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use std::fs;
+
+    #[test]
+    fn test_doctor_warns_on_large_target() {
+        let tmp = TempDir::new().unwrap();
+        // Simulate .workgraph dir — check_cargo_target_size takes this as `dir`
+        let wg_dir = tmp.path().join(".workgraph");
+        fs::create_dir(&wg_dir).unwrap();
+
+        // Project root is tmp.path() — place Cargo.toml there
+        fs::write(tmp.path().join("Cargo.toml"), "[package]\nname = \"test\"").unwrap();
+
+        // Create target/ with files exceeding our test threshold
+        let target_dir = tmp.path().join("target");
+        fs::create_dir(&target_dir).unwrap();
+        // Write a 2 KiB file; use a 1 KiB threshold
+        fs::write(target_dir.join("bigfile.bin"), vec![0u8; 2048]).unwrap();
+
+        let threshold = 1024; // 1 KiB for test
+        let checks = check_cargo_target_size_with_threshold(&wg_dir, threshold);
+
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, Status::Warn);
+        assert!(checks[0].name.contains("target/"));
+        assert!(checks[0].detail.contains("GiB"));
+        let hint = checks[0].hint.as_ref().unwrap();
+        assert!(hint.contains("cargo sweep"));
+        assert!(hint.contains("line-tables-only"));
+    }
+
+    #[test]
+    fn test_doctor_silent_no_cargo_toml() {
+        let tmp = TempDir::new().unwrap();
+        let wg_dir = tmp.path().join(".workgraph");
+        fs::create_dir(&wg_dir).unwrap();
+        // No Cargo.toml — should be silent
+        let checks = check_cargo_target_size_with_threshold(&wg_dir, 1024);
+        assert!(checks.is_empty());
+    }
+
+    #[test]
+    fn test_doctor_silent_under_threshold() {
+        let tmp = TempDir::new().unwrap();
+        let wg_dir = tmp.path().join(".workgraph");
+        fs::create_dir(&wg_dir).unwrap();
+
+        fs::write(tmp.path().join("Cargo.toml"), "[package]\nname = \"test\"").unwrap();
+
+        let target_dir = tmp.path().join("target");
+        fs::create_dir(&target_dir).unwrap();
+        // Write 100 bytes — under 1 KiB threshold
+        fs::write(target_dir.join("small.bin"), vec![0u8; 100]).unwrap();
+
+        let checks = check_cargo_target_size_with_threshold(&wg_dir, 1024);
+        assert!(checks.is_empty());
+    }
+}
