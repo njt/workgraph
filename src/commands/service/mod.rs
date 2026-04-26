@@ -19,6 +19,7 @@
 mod assignment;
 mod coordinator;
 pub(crate) mod coordinator_agent;
+mod idle_sweep;
 pub mod ipc;
 mod triage;
 pub(crate) mod worktree;
@@ -2354,6 +2355,9 @@ pub fn run_daemon(
     let mut archival_error_count: u64 = 0;
     let mut refresh_error_count: u64 = 0;
 
+    // Idle-time cargo sweep state
+    let mut idle_sweep_state = idle_sweep::IdleSweepState::new();
+
     while running && !ctrl_c_flag.load(Ordering::SeqCst) {
         // Reap zombie child processes (agents that have exited).
         // Even though agents call setsid() to create a new session, they are
@@ -2707,6 +2711,16 @@ pub fn run_daemon(
 
                     // Registry refresh runs directly in the daemon and is time-gated.
                     run_registry_refresh(&dir, &mut refresh_error_count, &logger);
+
+                    // Idle-time cargo sweep: runs `cargo sweep --time 7` once
+                    // when the graph has been quiet for 30+ minutes.
+                    idle_sweep_state.tick(
+                        result.agents_alive,
+                        result.tasks_ready,
+                        &dir,
+                        config.coordinator.auto_sweep_target,
+                        &logger,
+                    );
                 }
                 Err(e) => {
                     coord_state.ticks += 1;

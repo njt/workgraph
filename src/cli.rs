@@ -1460,6 +1460,10 @@ pub enum Commands {
         #[arg(long)]
         auto_triage: Option<bool>,
 
+        /// Enable/disable automatic `cargo sweep` when graph is idle (on/off)
+        #[arg(long, name = "auto-sweep")]
+        auto_sweep: Option<bool>,
+
         /// Enable/disable automatic placement analysis on new tasks
         #[arg(long)]
         auto_place: Option<bool>,

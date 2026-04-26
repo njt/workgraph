@@ -57,6 +57,10 @@ pub fn show(dir: &Path, scope: Option<ConfigScope>, json: bool) -> Result<()> {
                 config.coordinator.heartbeat_interval
             );
         }
+        println!(
+            "  auto_sweep_target = {}",
+            config.coordinator.auto_sweep_target
+        );
         println!();
         println!("[agency]");
         println!("  auto_evaluate = {}", config.agency.auto_evaluate);
@@ -309,6 +313,7 @@ pub fn update(
     creator_agent: Option<&str>,
     retention_heuristics: Option<&str>,
     auto_triage: Option<bool>,
+    auto_sweep: Option<bool>,
     auto_place: Option<bool>,
     auto_create: Option<bool>,
     triage_timeout: Option<u64>,
@@ -478,6 +483,12 @@ pub fn update(
     if let Some(v) = auto_triage {
         config.agency.auto_triage = v;
         println!("Set agency.auto_triage = {}", v);
+        changed = true;
+    }
+
+    if let Some(v) = auto_sweep {
+        config.coordinator.auto_sweep_target = v;
+        println!("Set coordinator.auto_sweep_target = {}", v);
         changed = true;
     }
 
@@ -1789,6 +1800,7 @@ mod tests {
             None,
             None,
             None, // auto_triage
+            None, // auto_sweep
             None, // auto_place
             None, // auto_create
             None,
@@ -1840,6 +1852,7 @@ mod tests {
             None,
             None,
             None, // auto_triage
+            None, // auto_sweep
             None, // auto_place
             None, // auto_create
             None,
@@ -1891,6 +1904,7 @@ mod tests {
             None,
             None,
             None, // auto_triage
+            None, // auto_sweep
             None, // auto_place
             None, // auto_create
             None,
@@ -1940,6 +1954,7 @@ mod tests {
             Some("creator-hash"),
             Some("Retire below 0.3 after 10 evals"),
             None, // auto_triage
+            None, // auto_sweep
             None, // auto_place
             None, // auto_create
             None, // triage_timeout

@@ -2683,6 +2683,12 @@ pub struct CoordinatorConfig {
     /// Resource management configuration for worktree cleanup and recovery.
     #[serde(default)]
     pub resource_management: ResourceManagementConfig,
+
+    /// Enable automatic `cargo sweep --time 7` when the graph is idle
+    /// (no agents alive and no tasks ready for 30+ minutes) and the project
+    /// root contains a Cargo.toml. Default: true.
+    #[serde(default = "default_auto_sweep_target")]
+    pub auto_sweep_target: bool,
 }
 
 /// Resource management configuration for cleanup operations and recovery branches.
@@ -2729,6 +2735,10 @@ fn default_auto_test_discovery() -> bool {
 }
 
 fn default_scoped_verify_enabled() -> bool {
+    true
+}
+
+fn default_auto_sweep_target() -> bool {
     true
 }
 
@@ -2944,6 +2954,7 @@ impl Default for CoordinatorConfig {
             verify_triage_enabled: default_verify_triage_enabled(),
             verify_progress_timeout: default_verify_progress_timeout(),
             resource_management: ResourceManagementConfig::default(),
+            auto_sweep_target: default_auto_sweep_target(),
         }
     }
 }

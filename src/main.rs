@@ -1973,6 +1973,7 @@ fn main() -> Result<()> {
             creator_agent,
             retention_heuristics,
             auto_triage,
+            auto_sweep,
             auto_place,
             auto_create,
             triage_timeout,
@@ -2217,6 +2218,7 @@ fn main() -> Result<()> {
                     && creator_agent.is_none()
                     && retention_heuristics.is_none()
                     && auto_triage.is_none()
+                    && auto_sweep.is_none()
                     && auto_place.is_none()
                     && auto_create.is_none()
                     && triage_timeout.is_none()
@@ -2259,6 +2261,7 @@ fn main() -> Result<()> {
                     creator_agent.as_deref(),
                     retention_heuristics.as_deref(),
                     auto_triage,
+                    auto_sweep,
                     auto_place,
                     auto_create,
                     triage_timeout,
