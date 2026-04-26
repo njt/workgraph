@@ -344,10 +344,15 @@ pub(crate) fn spawn_agent_inner(
                 Some(info)
             }
             Err(e) => {
-                eprintln!(
-                    "[spawn] Worktree creation failed for {}, falling back to shared working directory: {}",
-                    temp_agent_id, e
+                let branch = format!("wg/{}/{}", temp_agent_id, task_id);
+                let warning = format_worktree_fallback_warning(
+                    &temp_agent_id,
+                    &branch,
+                    &e.to_string(),
+                    dir,
                 );
+                log::warn!("{}", warning);
+                eprintln!("{}", warning);
                 None
             }
         }
@@ -1907,6 +1912,21 @@ fn handle_cost_cap_violation(
     }
 }
 
+fn format_worktree_fallback_warning(
+    agent_id: &str,
+    branch: &str,
+    git_error: &str,
+    fallback_cwd: &Path,
+) -> String {
+    format!(
+        "[spawn] Worktree creation failed for agent '{}' (branch '{}'): {}. \
+         Falling back to shared working directory: {:?}. \
+         Multiple concurrent agents may corrupt the shared working tree. \
+         Consider single-agent mode (max_agents=1) until worktree creation is fixed.",
+        agent_id, branch, git_error, fallback_cwd
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3076,5 +3096,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn worktree_creation_failure_logs_warning_with_reason() {
+        let agent_id = "agent-42";
+        let branch = "wg/agent-42/my-task";
+        let git_error = "fatal: 'C:/src/workgraph/.wg-worktrees/agent-42' already exists";
+        let fallback_cwd = Path::new("C:/src/workgraph");
+
+        let msg = format_worktree_fallback_warning(agent_id, branch, git_error, fallback_cwd);
+
+        assert!(msg.contains("agent-42"), "should contain agent ID");
+        assert!(
+            msg.contains("wg/agent-42/my-task"),
+            "should contain branch name"
+        );
+        assert!(
+            msg.contains("already exists"),
+            "should contain git error fragment"
+        );
+        assert!(
+            msg.contains("C:/src/workgraph"),
+            "should contain fallback cwd"
+        );
+        assert!(
+            msg.contains("max_agents=1"),
+            "should contain mitigation hint"
+        );
     }
 }
