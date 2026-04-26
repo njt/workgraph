@@ -397,11 +397,24 @@ fn check_workgraph_dir(dir: &Path) -> Vec<Check> {
     let mut out = Vec::new();
 
     if !dir.exists() {
-        out.push(Check::err(
-            ".workgraph dir",
-            format!("{} does not exist", dir.display()),
-            "Run `wg init` in your project root.",
-        ));
+        let cwd = dir.parent().unwrap_or(dir);
+        if is_system_path(cwd) {
+            out.push(Check {
+                name: ".workgraph dir".into(),
+                status: Status::Info,
+                detail: format!("{} does not exist", dir.display()),
+                hint: Some(
+                    "Run `wg init` inside a project directory \u{2014} you\u{2019}re currently in a system path."
+                        .into(),
+                ),
+            });
+        } else {
+            out.push(Check::err(
+                ".workgraph dir",
+                format!("{} does not exist", dir.display()),
+                "Run `wg init` in your project root.",
+            ));
+        }
         return out;
     }
 
@@ -565,7 +578,88 @@ fn is_pid_alive(pid: u32) -> bool {
     }
 }
 
+/// Returns true if the given path looks like a system directory rather than
+/// a user project root.  Used to soften "no .workgraph" from ERR to INFO
+/// when the user is clearly not in a project directory.
+fn is_system_path(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+
+    #[cfg(windows)]
+    {
+        let lower = s.to_ascii_lowercase();
+        let normalized = lower.replace('/', "\\");
+        normalized.starts_with(r"c:\program files\")
+            || normalized.starts_with(r"c:\program files (x86)\")
+            || normalized.starts_with(r"c:\windows\")
+            || normalized.starts_with(r"c:\programdata\")
+    }
+
+    #[cfg(not(windows))]
+    {
+        s.starts_with("/usr/")
+            || s.starts_with("/opt/")
+            || s.starts_with("/etc/")
+            || s.starts_with("/System/")
+    }
+}
+
 // Silence "unused import" on non-Windows where some helpers only apply to
 // the Windows branches above.
 #[allow(dead_code)]
 fn _unused_import_suppressor(_p: &PathBuf) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_doctor_cwd_softening_for_system_dirs() {
+        // A .workgraph path under a system directory that doesn't exist.
+        // check_workgraph_dir should return Info (not Err) with a hint about wg init.
+        let system_wg = PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\18\Community\.workgraph");
+        let checks = check_workgraph_dir(&system_wg);
+        assert_eq!(checks.len(), 1, "expected exactly one check result");
+        assert_eq!(
+            checks[0].status,
+            Status::Info,
+            "system path should produce Info, not Err; got {:?}: {}",
+            checks[0].status,
+            checks[0].detail
+        );
+        assert!(
+            checks[0].hint.as_deref().unwrap_or("").contains("wg init"),
+            "hint should mention wg init"
+        );
+        assert!(
+            checks[0].detail.contains("system path") || checks[0].hint.as_deref().unwrap_or("").contains("system path"),
+            "should mention 'system path' somewhere"
+        );
+    }
+
+    #[test]
+    fn test_doctor_cwd_normal_dir_still_errors() {
+        // A .workgraph path under a normal user directory that doesn't exist.
+        // check_workgraph_dir should still return Err.
+        let normal_wg = PathBuf::from(r"C:\Users\someone\projects\myapp\.workgraph");
+        let checks = check_workgraph_dir(&normal_wg);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(
+            checks[0].status,
+            Status::Err,
+            "normal user path should produce Err, not {:?}",
+            checks[0].status
+        );
+    }
+
+    #[test]
+    fn test_is_system_path_windows_patterns() {
+        assert!(is_system_path(Path::new(r"C:\Program Files\Microsoft Visual Studio\18\Community")));
+        assert!(is_system_path(Path::new(r"C:\Program Files (x86)\SomeApp")));
+        assert!(is_system_path(Path::new(r"C:\Windows\System32")));
+        assert!(is_system_path(Path::new(r"C:\ProgramData\SomeApp")));
+        // User directories should NOT match
+        assert!(!is_system_path(Path::new(r"C:\Users\someone\projects\myapp")));
+        assert!(!is_system_path(Path::new(r"D:\work\project")));
+    }
+}
