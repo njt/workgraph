@@ -946,7 +946,7 @@ mod tests {
         let script = fs::read_to_string(&wrapper_path).unwrap();
 
         assert!(
-            script.contains("feat: $TASK_ID ($WG_AGENT_ID)"),
+            script.contains("feat: $TASK_ID ($AGENT_ID)"),
             "Commit message should follow convention"
         );
         assert!(

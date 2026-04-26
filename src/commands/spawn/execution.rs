@@ -550,6 +550,7 @@ pub(crate) fn spawn_agent_inner(
     let wrapper_path = write_wrapper_script(
         &output_dir,
         task_id,
+        &temp_agent_id,
         &output_file_str,
         &timed_command,
         effective_timeout_secs,
@@ -1197,6 +1198,7 @@ fn build_inner_command(
 fn write_wrapper_script(
     output_dir: &Path,
     task_id: &str,
+    agent_id: &str,
     output_file_str: &str,
     timed_command: &str,
     effective_timeout_secs: Option<u64>,
@@ -1285,6 +1287,7 @@ fn write_wrapper_script(
     let wrapper_script = format!(
         r#"#!/bin/bash
 TASK_ID={escaped_task_id}
+AGENT_ID={escaped_agent_id}
 OUTPUT_FILE={escaped_output_file}
 
 # Allow nested Claude Code sessions (spawned agents are independent).
@@ -1434,7 +1437,7 @@ if [ -n "$WG_WORKTREE_PATH" ] && [ -n "$WG_BRANCH" ] && [ -n "$WG_PROJECT_ROOT" 
                         fi
                     fi
 
-                    git commit --no-gpg-sign -m "feat: $TASK_ID ($WG_AGENT_ID)
+                    git commit --no-gpg-sign -m "feat: $TASK_ID ($AGENT_ID)
 
 Squash-merged from worktree branch $WG_BRANCH" 2>> "$OUTPUT_FILE"
                     COMMIT_EXIT=$?
@@ -1483,6 +1486,7 @@ fi
 exit $EXIT_CODE
 "#,
         escaped_task_id = shell_escape(task_id),
+        escaped_agent_id = shell_escape(agent_id),
         // `$OUTPUT_FILE` is used throughout the wrapper as a `>>` redirect
         // target. Bash on Windows (Git-for-Windows) refuses `\\?\C:\...`
         // verbatim paths for redirects with "No such file or directory",
@@ -2826,6 +2830,7 @@ mod tests {
         let wrapper_path = write_wrapper_script(
             &output_dir,
             "test-task-1",
+            "test-agent-1",
             &sanitize_bash_path(&output_file_str),
             &agent_cmd,
             None,
@@ -2952,6 +2957,7 @@ mod tests {
         let wrapper_path = write_wrapper_script(
             &output_dir,
             "test-task-clean",
+            "test-agent-clean",
             &sanitize_bash_path(&output_file_str),
             agent_cmd,
             None,
@@ -3007,5 +3013,68 @@ mod tests {
             );
         }
         // If the file doesn't exist at all, that's fine too
+    }
+
+    #[test]
+    fn test_wrapper_commit_message_uses_real_task_slug_and_agent_id() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let output_dir = temp_dir.path().join("agent-output");
+        fs::create_dir_all(&output_dir).unwrap();
+
+        let output_file = output_dir.join("output.log");
+        let output_file_str = output_file.to_string_lossy().to_string();
+
+        let real_task_id = "implement-auth-endpoint";
+        let real_agent_id = "agent-42";
+
+        let wrapper_path = write_wrapper_script(
+            &output_dir,
+            real_task_id,
+            real_agent_id,
+            &sanitize_bash_path(&output_file_str),
+            "echo hello",
+            None,
+            "native",
+        )
+        .unwrap();
+
+        let script = fs::read_to_string(&wrapper_path).unwrap();
+
+        // The commit message line must contain the real task slug and agent id
+        // as baked-in literals, not rely on env vars that may be stale
+        assert!(
+            script.contains(&format!("AGENT_ID={}", shell_escape(real_agent_id))),
+            "Script must bake AGENT_ID as a literal shell variable, got:\n{}",
+            script.lines()
+                .take(10)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+
+        // The commit message must reference the baked-in variables
+        assert!(
+            script.contains("feat: $TASK_ID ($AGENT_ID)"),
+            "Commit message must use baked-in $TASK_ID and $AGENT_ID, not $WG_AGENT_ID"
+        );
+
+        // No placeholder/test literals may appear in the generated script's
+        // variable assignments or commit message
+        let forbidden = ["test-task-", "test-agent-"];
+        for pattern in &forbidden {
+            // Only check in the TASK_ID= and AGENT_ID= assignments and commit line
+            for line in script.lines() {
+                let trimmed = line.trim();
+                if (trimmed.starts_with("TASK_ID=")
+                    || trimmed.starts_with("AGENT_ID=")
+                    || trimmed.contains("feat: $TASK_ID"))
+                    && trimmed.contains(pattern)
+                {
+                    panic!(
+                        "Found forbidden placeholder '{}' in script line: {}",
+                        pattern, trimmed
+                    );
+                }
+            }
+        }
     }
 }
